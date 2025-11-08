@@ -1,11 +1,57 @@
 use crate::camera::{Camera, Projection};
 use crate::lenses::LensInterface;
+use crate::registry::{Id, Registry};
+use anyhow::format_err;
 use cgmath::Zero;
-use encase::ShaderType;
-use glam::{Mat4, UVec3, UVec4, Vec3, Vec4};
+use encase::internal::WriteInto;
+use encase::{ShaderType, UniformBuffer};
+use glam::{Mat4, UVec3, Vec3, Vec4};
 
 const NUM_INTERFACES: usize = 64;
 const NUM_BOUNCES: usize = NUM_INTERFACES * (NUM_INTERFACES - 1) / 2;
+
+pub struct Uniform<T> {
+    pub data: Box<T>,
+    pub buffer_id: Id<wgpu::Buffer>,
+    pub bind_group_layout_id: Id<wgpu::BindGroupLayout>,
+    pub bind_group_id: Id<wgpu::BindGroup>,
+}
+
+impl<T> Uniform<T> {
+    pub fn new(
+        data: T,
+        buffer_id: Id<wgpu::Buffer>,
+        bind_group_layout_id: Id<wgpu::BindGroupLayout>,
+        bind_group_id: Id<wgpu::BindGroup>,
+    ) -> Self {
+        Self {
+            data: Box::new(data),
+            buffer_id,
+            bind_group_layout_id,
+            bind_group_id,
+        }
+    }
+}
+
+impl<T> Uniform<T>
+where
+    T: ShaderType + WriteInto,
+{
+    pub fn write_buffer(
+        &self,
+        queue: &wgpu::Queue,
+        buffers: &Registry<wgpu::Buffer>,
+    ) -> Result<(), anyhow::Error> {
+        queue.write_buffer(
+            &buffers[&self.buffer_id],
+            0,
+            &UniformBuffer::<T>::content_of::<T, Vec<u8>>(&self.data)
+                .map_err(|e| format_err!("Failed to transform uniform to bytes: {e}"))?,
+        );
+
+        Ok(())
+    }
+}
 
 #[repr(C)]
 #[derive(Debug, Copy, Clone, ShaderType)]
