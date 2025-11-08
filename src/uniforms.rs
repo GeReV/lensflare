@@ -1,13 +1,14 @@
 use crate::camera::{Camera, Projection};
 use crate::lenses::LensInterface;
 use crate::registry::{Id, Registry};
+use crate::software::build_ray_grid_limits;
 use anyhow::format_err;
 use cgmath::Zero;
 use encase::internal::WriteInto;
 use encase::{ShaderType, UniformBuffer};
 use glam::{Mat4, UVec3, Vec3, Vec4};
 
-const NUM_INTERFACES: usize = 64;
+const NUM_INTERFACES: usize = 32;
 const NUM_BOUNCES: usize = NUM_INTERFACES * (NUM_INTERFACES - 1) / 2;
 
 pub struct Uniform<T> {
@@ -118,7 +119,7 @@ pub struct LensSystemUniform {
 impl From<&Vec<LensInterface>> for LensSystemUniform {
     fn from(lenses: &Vec<LensInterface>) -> Self {
         let mut result = Self {
-            interfaces: [LensInterfaceUniform::new(); 64],
+            interfaces: [LensInterfaceUniform::new(); NUM_INTERFACES],
             interface_count: 1 + lenses.len() as u32,
             bounce_count: {
                 let bounce_lens_count = lenses.len() - 1;
@@ -131,7 +132,7 @@ impl From<&Vec<LensInterface>> for LensSystemUniform {
         let mut offset = 0.0;
         let mut prev_thickness = 0.0;
 
-        const SCALE_FACTOR: f32 = 1e-2;
+        const SCALE_FACTOR: f32 = 0.1;
 
         result.interfaces[0] = LensInterfaceUniform {
             center: Vec3::ZERO,
@@ -181,7 +182,7 @@ impl From<&Vec<LensInterface>> for LensSystemUniform {
 #[repr(C)]
 #[derive(Debug, Clone, ShaderType)]
 pub struct BouncesAndLengthsUniform {
-    pub data: [UVec3; NUM_BOUNCES],
+    pub bounces_and_lengths: [UVec3; NUM_BOUNCES],
 }
 
 impl BouncesAndLengthsUniform {
@@ -203,10 +204,10 @@ impl BouncesAndLengthsUniform {
         }
 
         let mut result = Self {
-            data: [UVec3::ZERO; NUM_BOUNCES],
+            bounces_and_lengths: [UVec3::ZERO; NUM_BOUNCES],
         };
 
-        result.data[..vec.len()].copy_from_slice(&vec);
+        result.bounces_and_lengths[..vec.len()].copy_from_slice(&vec);
 
         result
     }
@@ -220,4 +221,35 @@ pub struct ParamsUniform {
     pub intensity: f32,
     pub lambda: f32,
     pub wireframe: u32,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, ShaderType)]
+pub struct GridLimits {
+    pub tl: Vec3,
+    pub br: Vec3,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, ShaderType)]
+pub struct GridLimitsUniform {
+    pub limits: [GridLimits; NUM_BOUNCES],
+}
+
+impl GridLimitsUniform {
+    pub fn new(
+        lenses_uniform: &LensSystemUniform,
+        bounces_and_lengths: &BouncesAndLengthsUniform,
+        ray_dir: Vec3,
+    ) -> Self {
+        let mut result = Self {
+            limits: [Default::default(); NUM_BOUNCES],
+        };
+
+        for i in 0..lenses_uniform.bounce_count as usize {
+            result.limits[i] = build_ray_grid_limits(lenses_uniform, bounces_and_lengths, ray_dir, i);
+        }
+
+        result
+    }
 }

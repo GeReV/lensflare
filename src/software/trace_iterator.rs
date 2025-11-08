@@ -85,8 +85,8 @@ impl<'a> Iterator for TraceIterator<'a> {
                 self.ray.tex.z = self.ray.tex.z.max(i.pos.xy().length() / f.sa);
             } else if self.t == self.aperture_index {
                 // iris aperture plane
-                self.ray.tex.x = i.pos.x / self.lens_interfaces[self.aperture_index].radius;
-                self.ray.tex.y = i.pos.y / self.lens_interfaces[self.aperture_index].radius;
+                self.ray.tex.x = i.pos.x / self.lens_interfaces[self.aperture_index].sa;
+                self.ray.tex.y = i.pos.y / self.lens_interfaces[self.aperture_index].sa;
             }
 
             // update ray direction and position

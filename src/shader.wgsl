@@ -28,7 +28,7 @@ struct Intersection {
     inverted: bool, // inverted intersection?
 }
 
-const NUM_INTERFACES: u32 = 64;
+const NUM_INTERFACES: u32 = 32;
 const NUM_BOUNCES: u32 = NUM_INTERFACES * (NUM_INTERFACES - 1) / 2;
 
 struct LensSystem {
@@ -36,6 +36,11 @@ struct LensSystem {
     interface_count: u32,
     bounce_count: u32,
     aperture_index: i32,
+}
+
+struct GridLimits {
+    tl: vec3f,
+    br: vec3f,
 }
 
 struct Params {
@@ -51,10 +56,13 @@ var<uniform> system: LensSystem;
 
 // First two elements are the bounces, element 3 is length.
 // Merged to handle 16-byte memory alignment.
-@group(2) @binding(0)
+@group(1) @binding(1)
 var<storage, read> bounces_and_lengths: array<vec3u, NUM_BOUNCES>;
 
-@group(3) @binding(0)
+@group(1) @binding(2)
+var<storage, read> grid_limits: array<GridLimits, NUM_BOUNCES>;
+
+@group(2) @binding(0)
 var<uniform> params: Params;
 
 const PI = radians(180.0);
@@ -377,8 +385,6 @@ fn vs_main(
 ) -> VertexOutput {
     var out: VertexOutput;
 
-    var pos = in.position * 2.0 + vec3f(-1, -1, 0);
-
 //    let light_pos = vec3f(-1.0, -1.0, 8.0);
 //    let ray_dir = normalize(pos - light_pos);
 
@@ -389,14 +395,18 @@ fn vs_main(
         bid = params.bid;
     }
 
+    let grid_limit = grid_limits[bid];
+
+    var pos = mix(grid_limit.tl, grid_limit.br, in.position);
+
     // Set lens entrance center to the center of the lens with an offset relative to the ray's position and the lens' radius,
     // i.e., radius * 0.5 away from center of the lens.
-    let ray_pos = system.interfaces[0].center + vec3f(pos.xy, 0) * system.interfaces[0].sa * 0.5;
+    let ray_pos = system.interfaces[0].center + pos + vec3f(0, 0, 0.5);
     let ray_dir = normalize(ray_pos - params.light_pos);
 
 //    let light_pos = pos * system.interfaces[0].sa;
 //    let ray_dir = vec3f(0, 0, 1);
-    let ray_tex = vec4f(in.position.xy, system.interfaces[0].sa, params.intensity);
+    let ray_tex = vec4f(in.position.xy, 1.0, params.intensity);
 
     let wavelengths = array<f32, 3>(645, 520, 400);
 
@@ -424,6 +434,7 @@ fn vs_main(
     out.position = in.position;
 
     out.clip_position = camera.view_proj * vec4f(out_ray.pos, 1.0);
+//    out.clip_position = camera.view_proj * vec4f(pos, 1.0);
 
     out.color = col;
     out.tex = out_ray.tex;
@@ -435,22 +446,29 @@ fn vs_main(
 
 //    out.color = vec4f(hsv2rgb(vec3f(out_ray.tex.a, 1, 1)), 0.1);
 
-//    out.color = vec4f(1.0);
+//    out.color = vec3f(1.0);
 
     return out;
 }
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4f {
-    var color = vec4f(in.color, in.tex.a);
+    if in.tex.z > 1 {
+        discard;
+    }
+
+    let d = length(in.tex.xy * 2.0 - 1.0);
+    let a = smoothstep(0.4, 0.3, d);
+
+    var color = vec4f(in.color, in.tex.a * (1.0 - a));
 
     if params.wireframe == 1 {
-//        color.a = max(0.05, color.a);
+        color.a = max(0.05, color.a);
     }
 
-    if in.tex.z > 1 {
-        color.a = 0;
-    }
+//    if in.tex.z > 1 {
+//        color.a = 0;
+//    }
 
     return color;
 }

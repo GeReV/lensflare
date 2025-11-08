@@ -18,7 +18,9 @@ use crate::lenses::{parse_lenses, LensInterface};
 use crate::mesh::Mesh;
 use crate::registry::Registry;
 use crate::software::{trace, Ray};
-use crate::uniforms::{BouncesAndLengthsUniform, CameraUniform, ParamsUniform, Uniform};
+use crate::uniforms::{
+    BouncesAndLengthsUniform, CameraUniform, GridLimits, GridLimitsUniform, ParamsUniform, Uniform,
+};
 use crate::vertex::{ColoredVertex, Vertex};
 use anyhow::*;
 use cgmath::Zero;
@@ -60,7 +62,7 @@ enum PipelineId {
     Lines,
 }
 
-const GRID_SIZE_LOG2: u32 = 6;
+const GRID_SIZE_LOG2: u32 = 7;
 const GRID_SIZE: u32 = 1 << GRID_SIZE_LOG2;
 const GRID_SIZE_VERTEX_COUNT: u32 = GRID_SIZE + 1;
 const GRID_VERTEX_BUFFER_SIZE: u32 = GRID_SIZE_VERTEX_COUNT * GRID_SIZE_VERTEX_COUNT;
@@ -90,9 +92,10 @@ struct State {
     bind_group_layouts: Registry<wgpu::BindGroupLayout>,
     bind_groups: Registry<wgpu::BindGroup>,
 
-    bounces_and_lengths_uniform: Uniform<BouncesAndLengthsUniform>,
-    lenses_uniform: Uniform<LensSystemUniform>,
     camera_uniform: Uniform<CameraUniform>,
+    lenses_uniform: Uniform<LensSystemUniform>,
+    bounces_and_lengths_uniform: Uniform<BouncesAndLengthsUniform>,
+    grid_limits_uniform: Uniform<GridLimitsUniform>,
     params_uniform: Uniform<ParamsUniform>,
 
     grid_mesh: Mesh,
@@ -223,44 +226,13 @@ impl State {
 
         let lenses_uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Lens System Uniform Buffer"),
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
             contents: &UniformBuffer::<CameraUniform>::content_of::<_, Vec<u8>>(&lenses_uniform)?,
         });
 
-        let lenses_bind_group_layout =
-            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("Lenses Bind Group Layout"),
-                entries: &[wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: ShaderStages::VERTEX,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                }],
-            });
-
-        let lenses_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Lenses Bind Group"),
-            layout: &lenses_bind_group_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: lenses_uniform_buffer.as_entire_binding(),
-            }],
-        });
-
-        let lenses_uniform = Uniform::new(
-            lenses_uniform,
-            buffers.add(lenses_uniform_buffer),
-            bind_group_layouts.add(lenses_bind_group_layout),
-            bind_groups.add(lenses_bind_group),
-        );
-
         let bounces_and_lengths_uniform = BouncesAndLengthsUniform::new(
-            lenses_uniform.data.interface_count as usize,
-            lenses_uniform.data.aperture_index as usize,
+            lenses_uniform.interface_count as usize,
+            lenses_uniform.aperture_index as usize,
         );
 
         let bounces_and_lengths_buffer =
@@ -272,9 +244,103 @@ impl State {
                 )?,
             });
 
+        let grid_limits_uniform = GridLimitsUniform::new(
+            &lenses_uniform,
+            &bounces_and_lengths_uniform,
+            vec3(0.0, 0.0, 1.0),
+        );
+
+        let grid_limits_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Grid Limits Uniform Buffer"),
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+            contents: &StorageBuffer::<GridLimitsUniform>::content_of::<_, Vec<u8>>(
+                &grid_limits_uniform,
+            )?,
+        });
+
+        let lenses_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("Lenses Bind Group Layout"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: ShaderStages::VERTEX,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: ShaderStages::VERTEX,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: ShaderStages::VERTEX,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                ],
+            });
+
+        let lenses_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Lenses Bind Group"),
+            layout: &lenses_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: lenses_uniform_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: bounces_and_lengths_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: grid_limits_buffer.as_entire_binding(),
+                },
+            ],
+        });
+
+        let lenses_bind_group_layout_id = bind_group_layouts.add(lenses_bind_group_layout);
+        let lenses_bind_group_id = bind_groups.add(lenses_bind_group);
+
+        let lenses_uniform = Uniform::new(
+            lenses_uniform,
+            buffers.add(lenses_uniform_buffer),
+            lenses_bind_group_layout_id.clone(),
+            lenses_bind_group_id.clone(),
+        );
+
+        let bounces_and_lengths_uniform = Uniform::new(
+            bounces_and_lengths_uniform,
+            buffers.add(bounces_and_lengths_buffer),
+            lenses_bind_group_layout_id.clone(),
+            lenses_bind_group_id.clone(),
+        );
+
+        let grid_limits_uniform = Uniform::new(
+            grid_limits_uniform,
+            buffers.add(grid_limits_buffer),
+            lenses_bind_group_layout_id.clone(),
+            lenses_bind_group_id.clone(),
+        );
+
         let params = ParamsUniform {
             light_pos: Vec3::new(-0.5, -0.5, 50.0),
-            bid: -1,
+            bid: 39,
             intensity: 0.5,
             lambda: 520.0, // 520 nm is some green color.
             wireframe: 0,
@@ -341,44 +407,12 @@ impl State {
             mapped_at_creation: false,
         });
 
-        let bounces_and_lengths_bind_group_layout =
-            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("Bounces and Lengths Bind Group Layout"),
-                entries: &[wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: ShaderStages::VERTEX,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                }],
-            });
-
-        let bounces_and_lengths_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Bounces and Lengths Bind Group"),
-            layout: &bounces_and_lengths_bind_group_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: bounces_and_lengths_buffer.as_entire_binding(),
-            }],
-        });
-
-        let bounces_and_lengths_uniform = Uniform::new(
-            bounces_and_lengths_uniform,
-            buffers.add(bounces_and_lengths_buffer),
-            bind_group_layouts.add(bounces_and_lengths_bind_group_layout),
-            bind_groups.add(bounces_and_lengths_bind_group),
-        );
-
         let render_pipelines = Self::setup_render_pipelines(
             &device,
             &config,
             &[
                 &camera_uniform.bind_group_layout_id,
                 &lenses_uniform.bind_group_layout_id,
-                &bounces_and_lengths_uniform.bind_group_layout_id,
                 &params_uniform.bind_group_layout_id,
             ]
             .map(|bind_group_layout_id| &bind_group_layouts[bind_group_layout_id]),
@@ -471,17 +505,19 @@ impl State {
             camera,
             projection,
             camera_controller,
+
             camera_uniform,
-            // inputs_bind_group,
-            // inputs_bind_group2,
             lenses_uniform,
             bounces_and_lengths_uniform,
+            grid_limits_uniform,
             params_uniform,
+
             grid_mesh,
             static_lines_vertices,
             static_lines_vertex_buffer,
             ray_lines_vertices: Vec::with_capacity(1 << 18),
             ray_lines_vertex_buffer,
+
             selected_lens: -1,
             selected_ray: -1,
             ray_step_count: 30,
@@ -511,7 +547,7 @@ impl State {
         // for i in 0..3 {
         for i in lens_range {
             let lens = &lenses_uniform.interfaces[i];
-            let bounces = selected_bid.map(|bid| bounces_and_lengths.data[bid].xy());
+            let bounces = selected_bid.map(|bid| bounces_and_lengths.bounces_and_lengths[bid].xy());
 
             let lens_center = lens.center;
 
@@ -611,7 +647,9 @@ impl State {
     fn build_ray_traces_debug_lines(
         lenses_uniform: &LensSystemUniform,
         bounces_and_lengths: &BouncesAndLengthsUniform,
+        ray_grid_limits: &GridLimitsUniform,
         line_vertices: &mut Vec<ColoredVertex>,
+        ray_dir: Vec3,
         ray_count: usize,
         selected_ray: Option<usize>,
         selected_bid: Option<usize>,
@@ -619,28 +657,35 @@ impl State {
         ray_lambda: f32,
         ray_step_count: usize,
     ) {
+        let entrance = &lenses_uniform.interfaces[0];
+
         let ray_range = match selected_ray {
             Some(ray) => ray..ray + 1,
             None => 0..ray_count,
         };
 
-        for i in ray_range {
-            let entrance = &lenses_uniform.interfaces[0];
+        let selected_bid = selected_bid.unwrap_or(0);
 
+        let grid_limits = ray_grid_limits.limits[selected_bid];
+
+        for i in ray_range {
             let t = i as f32 / (ray_count - 1) as f32;
 
+            let bottom = grid_limits.br.with_x(0.0);
+            let top = grid_limits.tl.with_x(0.0);
             let ray = Ray {
-                pos: Vec3::new(0.0, entrance.center.y - (t - 0.5) * entrance.sa, 0.5),
-                dir: Vec3::new(0.0, 0.0, -1.0),
+                pos: bottom + (top - bottom) * t + vec3(0.0, 0.0, 0.5),
+                dir: ray_dir,
                 tex: Vec4::new(0.5, t, entrance.sa, ray_intensity),
+                hit_sensor: true,
             };
 
             let iter = TraceIterator::new(
                 &lenses_uniform.interfaces,
-                &bounces_and_lengths.data,
+                &bounces_and_lengths.bounces_and_lengths,
                 lenses_uniform.aperture_index as usize,
                 ray,
-                selected_bid.unwrap_or(0),
+                selected_bid,
                 ray_lambda,
             );
 
@@ -898,10 +943,16 @@ impl State {
                 selected_bid,
             );
 
+            let lens_center = self.lenses_uniform.data.interfaces[0].center;
+
+            let ray_dir = (lens_center - self.params_uniform.data.light_pos).normalize();
+
             Self::build_ray_traces_debug_lines(
                 &self.lenses_uniform.data,
                 &self.bounces_and_lengths_uniform.data,
+                &self.grid_limits_uniform.data,
                 &mut self.ray_lines_vertices,
+                ray_dir,
                 DEBUG_RAY_COUNT as usize,
                 selected_ray,
                 selected_bid,
@@ -957,7 +1008,6 @@ impl State {
             let binds = [
                 &self.camera_uniform.bind_group_id,
                 &self.lenses_uniform.bind_group_id,
-                &self.bounces_and_lengths_uniform.bind_group_id,
                 &self.params_uniform.bind_group_id,
             ];
 
@@ -1105,7 +1155,7 @@ impl State {
 
                     let bid = self.params_uniform.data.bid.max(0);
                     let bounces_and_length =
-                        self.bounces_and_lengths_uniform.data.data[bid as usize];
+                        self.bounces_and_lengths_uniform.data.bounces_and_lengths[bid as usize];
                     ui.text(format!(
                         "{}->{} ({})",
                         bounces_and_length.x, bounces_and_length.y, bounces_and_length.z

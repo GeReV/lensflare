@@ -1,14 +1,17 @@
-use crate::uniforms::LensInterfaceUniform as LensInterface;
-use glam::{UVec3, Vec3, Vec3Swizzles, Vec4};
+use crate::uniforms::{
+    BouncesAndLengthsUniform, GridLimits, LensInterfaceUniform as LensInterface, LensSystemUniform,
+};
+use glam::{vec3, UVec3, Vec3, Vec3Swizzles, Vec4};
 use std::f32::consts::PI;
 
 pub mod trace_iterator;
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct Ray {
     pub(crate) pos: Vec3,
     pub(crate) dir: Vec3,
     pub(crate) tex: Vec4,
+    pub(crate) hit_sensor: bool,
 }
 
 #[derive(Default)]
@@ -126,12 +129,10 @@ pub fn trace(
     bounces_and_lengths: &[UVec3],
     aperture_index: usize,
 ) -> Ray {
-    let mut r: Ray = r_in.clone();
+    let mut ray: Ray = r_in.clone();
 
-    let surfaces = bounces_and_lengths[bid].xy().to_array(); // read 2 surfaces to reflect
-    let length = bounces_and_lengths[bid].z; // length of intersections
-
-    println!("{surfaces:?}");
+    let surfaces = bounces_and_lengths[bid].xy(); // read 2 surfaces to reflect
+    let length = bounces_and_lengths[bid].z as usize; // length of intersections
 
     // initialization
     let mut phase: usize = 0; // ray-tracing phase
@@ -139,7 +140,7 @@ pub fn trace(
     let mut t: usize = 1; // index of target in trace to test
 
     let mut k: usize = 0;
-    while k < length as usize {
+    while k < length {
         let f = interfaces[t];
         let b_reflect = if phase < 2 {
             t == surfaces[phase] as usize
@@ -153,58 +154,65 @@ pub fn trace(
 
         // i n t e r s e c t i o n t e s t
         let i = if f.flat_surface == 1 {
-            test_flat(&r, &f)
+            test_flat(&ray, &f)
         } else {
-            test_sphere(&r, &f)
+            test_sphere(&ray, &f)
         };
 
         if !i.hit {
             // exit upon miss
+            k += 1;
             break;
         }
 
         // record texture coord. or max. rel. radius
         if f.flat_surface == 0 {
-            r.tex.z = r.tex.z.max(i.pos.xy().length() / f.sa);
+            ray.tex.z = ray.tex.z.max(i.pos.xy().length() / f.sa);
         } else if t == aperture_index {
             // iris aperture plane
-            r.tex.x = i.pos.x / interfaces[aperture_index].radius;
-            r.tex.y = i.pos.y / interfaces[aperture_index].radius;
+            ray.tex.x = i.pos.x / interfaces[aperture_index].sa;
+            ray.tex.y = i.pos.y / interfaces[aperture_index].sa;
         }
 
         // update ray direction and position
-        r.dir = (i.pos - r.pos).normalize();
+        ray.dir = (i.pos - ray.pos).normalize();
 
         if i.inverted {
-            r.dir *= -1.0; // corrected inverted ray
+            ray.dir *= -1.0; // corrected inverted ray
         }
 
-        r.pos = i.pos;
+        ray.pos = i.pos;
 
         // skip reflection/refraction for flat surfaces
         if f.flat_surface == 1 {
+            t = t.checked_add_signed(delta).unwrap();
+            k += 1;
+
             continue;
         }
 
         // do reflection/refraction for spher. surfaces
-        let n0: f32 = if r.dir.z < 0.0 { f.n.x } else { f.n.z };
         let n1 = f.n.y;
-        let n2: f32 = if r.dir.z < 0.0 { f.n.x } else { f.n.z };
 
-        if !b_reflect
-        {
+        let (n0, n2) = if ray.dir.z < 0.0 {
+            (f.n.x, f.n.z)
+        } else {
+            (f.n.z, f.n.x)
+        };
+
+        if !b_reflect {
             // refraction
-            r.dir = refract(r.dir, i.norm, n0 / n2);
-            if r.dir == Vec3::ZERO {
+            ray.dir = refract(ray.dir, i.norm, n0 / n2);
+            if ray.dir == Vec3::ZERO {
                 // total reflection
+                k += 1;
                 break;
             }
-        } else
-        {
+        } else {
             // reflection with anti-reflection coating
-            r.dir = reflect(r.dir, i.norm);
+            ray.dir = reflect(ray.dir, i.norm);
             let anti_ref = fresnel_anti_reflect(i.theta, lambda, f.d1, n0, n1, n2);
-            r.tex.w *= anti_ref; // update ray intensity
+            ray.tex.w *= anti_ref; // update ray intensity
         }
 
         t = t.checked_add_signed(delta).unwrap();
@@ -212,12 +220,104 @@ pub fn trace(
     }
 
     if k < length as usize {
-        r.tex.w = 0.0; // early-exit rays = invalid
-        println!("{k}/{length}");
-    } else {
-        println!("trace");
+        ray.tex.w = 0.0; // early-exit rays = invalid
+        ray.hit_sensor = false;
     }
 
-    r
+    ray
 }
 
+fn search_ray_grid_limits(
+    lenses_uniform: &LensSystemUniform,
+    bounces_and_lengths: &BouncesAndLengthsUniform,
+    selected_bid: usize,
+    ray_dir: Vec3,
+    search_range_outer: Vec3,
+    search_range_inner: Vec3,
+) -> Vec3 {
+    let mut inner = search_range_inner;
+    let mut outer = search_range_outer;
+    let mut middle = outer;
+
+    let mut ray = Ray {
+        pos: outer - ray_dir,
+        dir: ray_dir,
+        tex: Vec4::new(
+            0.5,
+            0.5,
+            (outer - inner).length(),
+            1.0,
+        ),
+        hit_sensor: true,
+    };
+
+    for _ in 0..10 {
+        ray.pos = middle - ray_dir;
+
+        let out_ray = trace(
+            selected_bid,
+            &ray,
+            500.0,
+            &lenses_uniform.interfaces,
+            &bounces_and_lengths.bounces_and_lengths,
+            lenses_uniform.aperture_index as usize,
+        );
+
+        const EPSILON: f32 = 0.1;
+        if out_ray.hit_sensor && (0.0..EPSILON).contains(&(out_ray.tex.z - 1.0)) {
+            break;
+        }
+
+        if out_ray.hit_sensor {
+            inner = middle;
+        } else {
+            outer = middle;
+        }
+
+        middle = inner + (outer - inner) * 0.5;
+    }
+
+    middle
+}
+
+pub fn build_ray_grid_limits(
+    lenses_uniform: &LensSystemUniform,
+    bounces_and_lengths: &BouncesAndLengthsUniform,
+    ray_dir: Vec3,
+    selected_bid: usize,
+) -> GridLimits {
+    let entrance = &lenses_uniform.interfaces[0];
+
+    let lens_center = entrance.center;
+
+    let grid_limit_tl = {
+        let outer = lens_center + vec3(1.0, 1.0, 0.0) * 0.5 * entrance.sa;
+
+        search_ray_grid_limits(
+            &lenses_uniform,
+            &bounces_and_lengths,
+            selected_bid,
+            ray_dir,
+            outer,
+            lens_center,
+        )
+    };
+
+    let grid_limit_br = {
+        let outer = lens_center - vec3(1.0, 1.0, 0.0) * 0.5 * entrance.sa;
+
+        search_ray_grid_limits(
+            &lenses_uniform,
+            &bounces_and_lengths,
+            selected_bid,
+            ray_dir,
+            outer,
+            lens_center,
+        )
+    };
+
+    GridLimits {
+        tl: grid_limit_tl,
+        br: grid_limit_br,
+    }
+}
