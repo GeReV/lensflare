@@ -132,7 +132,7 @@ impl From<&Vec<LensInterface>> for LensSystemUniform {
         let mut offset = 0.0;
         let mut prev_thickness = 0.0;
 
-        const SCALE_FACTOR: f32 = 0.1;
+        const SCALE_FACTOR: f32 = 1e-2;
 
         result.interfaces[0] = LensInterfaceUniform {
             center: Vec3::ZERO,
@@ -216,7 +216,7 @@ impl BouncesAndLengthsUniform {
 #[repr(C)]
 #[derive(Debug, Clone, Copy, ShaderType)]
 pub struct ParamsUniform {
-    pub light_pos: Vec3,
+    pub ray_dir: Vec3,
     pub bid: i32,
     pub intensity: f32,
     pub lambda: f32,

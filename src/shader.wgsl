@@ -44,7 +44,7 @@ struct GridLimits {
 }
 
 struct Params {
-    light_pos: vec3f,
+    ray_dir: vec3f,
     bid: i32,
     intensity: f32,
     lambda: f32,
@@ -325,16 +325,26 @@ fn trace(
        }
        // do reflection/refraction for spher. surfaces
        var n0: f32;
-       let n1 = f.n.y;
+       var n1 = f.n.y;
        var n2: f32;
 
-       if r.dir.z < 0 {
-       n0 = f.n.x;
-       n2 = f.n.z;
-       } else {
-       n0 = f.n.z;
-        n2 = f.n.x;
+        if r.dir.z < 0 {
+            n0 = f.n.x;
+            n2 = f.n.z;
+        } else {
+            n0 = f.n.z;
+            n2 = f.n.x;
         }
+
+//        let lambda_offset = (1 - ((lambda - 380) / (800 - 380))) * 0.005;
+//
+//        n1 += lambda_offset;
+//
+//        if n0 > 1 {
+//            n0 += lambda_offset;
+//        } else {
+//            n2 += lambda_offset;
+//        }
 
        if !bReflect // refraction
        {
@@ -374,7 +384,7 @@ struct VertexInput {
 struct VertexOutput {
     @builtin(position) clip_position: vec4f,
     @location(0) position: vec3f,
-    @location(1) color: vec3f,
+    @location(1) color: vec4f,
     @location(2) tex: vec4f,
 //    @location(1) tex_coords: vec2<f32>,
 }
@@ -397,18 +407,19 @@ fn vs_main(
 
     let grid_limit = grid_limits[bid];
 
-    var pos = mix(grid_limit.tl, grid_limit.br, in.position);
+    var in_pos: vec3f;
+    in_pos = mix(grid_limit.tl, grid_limit.br, in.position);
 
     // Set lens entrance center to the center of the lens with an offset relative to the ray's position and the lens' radius,
     // i.e., radius * 0.5 away from center of the lens.
-    let ray_pos = system.interfaces[0].center + pos + vec3f(0, 0, 0.5);
-    let ray_dir = normalize(ray_pos - params.light_pos);
+    let ray_pos = system.interfaces[0].center + in_pos;
+    let ray_dir = normalize(params.ray_dir);
 
 //    let light_pos = pos * system.interfaces[0].sa;
 //    let ray_dir = vec3f(0, 0, 1);
     let ray_tex = vec4f(in.position.xy, 1.0, params.intensity);
 
-    let wavelengths = array<f32, 3>(645, 520, 400);
+    let wavelengths = array<f32, 3>(645, 520, 408);
 
     let wavelength = wavelengths[lambda];
 
@@ -417,7 +428,7 @@ fn vs_main(
 
     var col = wavelength_to_rgb(wavelength);
 
-//    var col = vec3f();
+//    col = vec3f();
 //    switch (lambda) {
 //        case 0: {
 //          col.x = 1;
@@ -432,12 +443,23 @@ fn vs_main(
 //    }
 
     out.position = in.position;
+    out.tex = out_ray.tex;
 
-    out.clip_position = camera.view_proj * vec4f(out_ray.pos, 1.0);
+    var pos = out_ray.pos;
+//    if out.tex.z > 1 {
+//        pos = in_pos;
+//    }
+
+    out.clip_position = camera.view_proj * vec4f(pos.xy, 0, 1);
 //    out.clip_position = camera.view_proj * vec4f(pos, 1.0);
 
-    out.color = col;
-    out.tex = out_ray.tex;
+//    col = vec3f(in.position.xy, 0);
+//    if out.tex.z > 1 {
+//        col = vec3f(0.1);
+//    }
+
+    out.color = vec4f(col, 1);
+
 
 //    out.color = vec4f(f32(bounces_and_lengths[params.bid].x) / 11.0, f32(bounces_and_lengths[params.bid].y) / 11.0, 0.0, 1.0);
 //    out.color = vec4f(hsv2rgb(vec3f(f32(bid) / 38.0, 0.5, 0.5)), 0.1);
@@ -451,20 +473,43 @@ fn vs_main(
     return out;
 }
 
+fn luminance(v: vec3f) -> f32 {
+    return dot(v, vec3f(0.2126, 0.7152, 0.0722));
+}
+
+fn reinhard(v: vec3f) -> vec3f {
+    let l = luminance(v);
+
+    let factor = l / (l + 1);
+
+    return v / (1 + v);
+}
+
+fn reinhard2(x: vec3f) -> vec3f {
+  const L_white = 16.0;
+
+  return (x * (1.0 + x / (L_white * L_white))) / (1.0 + x);
+}
+
+
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4f {
+
+    let aperture = smoothstep(0.4, 0.3, length(in.tex.xy));
+
+    var alpha = in.tex.a;
+    if min(alpha, 1000) == 1000 {
+        alpha = 0;
+    }
+
+    var color = vec4f(in.color.xyz, 1) * aperture * alpha;
+
     if in.tex.z > 1 {
-        discard;
+        color.a = 0;
     }
-
-    let d = length(in.tex.xy * 2.0 - 1.0);
-    let a = smoothstep(0.4, 0.3, d);
-
-    var color = vec4f(in.color, in.tex.a * (1.0 - a));
-
-    if params.wireframe == 1 {
-        color.a = max(0.05, color.a);
-    }
+//    if params.wireframe == 1 {
+//        color.a = max(0.05, color.a);
+//    }
 
 //    if in.tex.z > 1 {
 //        color.a = 0;
