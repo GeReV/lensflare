@@ -21,6 +21,10 @@ pub struct Camera {
     pub position: Vec3,
     pub yaw: Rad<f32>,
     pub pitch: Rad<f32>,
+
+    home_position: Vec3,
+    home_yaw: Rad<f32>,
+    home_pitch: Rad<f32>,
 }
 
 impl Camera {
@@ -33,11 +37,24 @@ impl Camera {
         yaw: Y,
         pitch: P,
     ) -> Self {
+        let position = position.into();
+        let yaw = yaw.into();
+        let pitch = pitch.into();
+
         Self {
-            position: position.into(),
-            yaw: yaw.into(),
-            pitch: pitch.into(),
+            position,
+            yaw,
+            pitch,
+            home_position: position,
+            home_yaw: yaw,
+            home_pitch: pitch,
         }
+    }
+
+    pub fn reset(&mut self) {
+        self.position = self.home_position;
+        self.yaw = self.home_yaw;
+        self.pitch = self.home_pitch;
     }
 
     pub fn calc_matrix(&self) -> Mat4 {

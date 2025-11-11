@@ -178,44 +178,13 @@ impl State {
         );
         let camera_controller = CameraController::new(4.0, 1.75);
 
-        let camera_uniform = CameraUniform::from_camera_and_projection(&camera, &projection);
-
-        let camera_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Camera Buffer"),
-            usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
-            contents: &UniformBuffer::<CameraUniform>::content_of::<_, Vec<u8>>(&camera_uniform)?,
-        });
-
-        let camera_bind_group_layout =
-            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("Camera Bind Group Layout"),
-                entries: &[wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: ShaderStages::VERTEX,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                }],
-            });
-
-        let camera_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Camera Bind Group"),
-            layout: &camera_bind_group_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: camera_buffer.as_entire_binding(),
-            }],
-        });
-
-        let camera_uniform = Uniform::new(
-            camera_uniform,
-            buffers.add(camera_buffer),
-            bind_group_layouts.add(camera_bind_group_layout),
-            bind_groups.add(camera_bind_group),
-        );
+        let (projection, camera, camera_controller, camera_uniform) = Self::create_camera(
+            &device,
+            &config,
+            &mut buffers,
+            &mut bind_group_layouts,
+            &mut bind_groups,
+        )?;
 
         let lenses = parse_lenses(include_str!("../lenses/wide.22mm.dat"))
             .map_err(|e| format_err!("Failed to parse lenses: {}", e))?;
@@ -528,7 +497,69 @@ impl State {
             last_frame: Instant::now(),
 
             debug_mode: false,
+            draw_axes: false,
         })
+    }
+
+    fn create_camera(
+        device: &Device,
+        config: &SurfaceConfiguration,
+        buffers: &mut Registry<wgpu::Buffer>,
+        bind_group_layouts: &mut Registry<BindGroupLayout>,
+        bind_groups: &mut Registry<wgpu::BindGroup>,
+    ) -> Result<(Projection, Camera, CameraController, Uniform<CameraUniform>), Error> {
+        let projection =
+            camera::Projection::new(config.width, config.height, cgmath::Deg(45.0), 0.1, 100.0);
+
+        // For a 45 degree projection, having the same distance as the closest lens' radius should
+        // have it exactly cover the "sensor".
+        let camera_distance = 0.17996 * 0.5;
+        let camera = Camera::new(
+            (0.0, 0.0, -camera_distance), // target at world origin
+            cgmath::Deg(90.0),            // yaw
+            cgmath::Deg(0.0),             // pitch
+        );
+        let camera_controller = CameraController::new(4.0, 1.75);
+
+        let camera_uniform = CameraUniform::from_camera_and_projection(&camera, &projection);
+
+        let camera_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Camera Buffer"),
+            usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
+            contents: &UniformBuffer::<CameraUniform>::content_of::<_, Vec<u8>>(&camera_uniform)?,
+        });
+
+        let camera_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("Camera Bind Group Layout"),
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                }],
+            });
+
+        let camera_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Camera Bind Group"),
+            layout: &camera_bind_group_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: camera_buffer.as_entire_binding(),
+            }],
+        });
+
+        let camera_uniform = Uniform::new(
+            camera_uniform,
+            buffers.add(camera_buffer),
+            bind_group_layouts.add(camera_bind_group_layout),
+            bind_groups.add(camera_bind_group),
+        );
+        Ok((projection, camera, camera_controller, camera_uniform))
     }
 
     fn build_lens_system_debug_lines(
@@ -875,6 +906,7 @@ impl State {
         if !self.camera_controller.handle_key(key, pressed) {
             match (key, pressed) {
                 (KeyCode::Escape, true) => event_loop.exit(),
+                (KeyCode::Home, true) => self.camera.reset(),
                 _ => {}
             }
         }
