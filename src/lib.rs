@@ -1278,9 +1278,9 @@ impl State {
 
         self.update_render_pipelines();
 
-        if self.debug_mode {
-            self.ray_lines_vertices.clear();
+        self.ray_lines_vertices.clear();
 
+        if self.debug_mode {
             let selected_bid = if self.params_uniform.data.bid >= 0 {
                 Some(self.params_uniform.data.bid as usize)
             } else {
