@@ -1266,6 +1266,10 @@ impl State {
 
         let ray_pos = vec3(cos_pitch * cos_yaw, sin_pitch, cos_pitch * sin_yaw).normalize();
 
+        self.lenses_uniform
+            .write_buffer(&self.queue, &self.buffers)
+            .unwrap();
+
         self.params_uniform.data.ray_dir = -ray_pos;
 
         self.params_uniform
@@ -1683,6 +1687,21 @@ impl State {
                     );
                     ui.slider("Select Ray", -1, DEBUG_RAY_COUNT, &mut self.selected_ray);
                     ui.slider("Ray Step Count", 0, 100, &mut self.ray_step_count);
+
+                    // List of slider for the anti-reflection coating on each interface.
+                    if ui.collapsing_header("Anti-reflection Coatings", TreeNodeFlags::DEFAULT_OPEN)
+                    {
+                        for i in 1..self.lenses_uniform.data.interface_count {
+                            let interface = &mut self.lenses_uniform.data.interfaces[i as usize];
+
+                            ui.slider(
+                                format!("Interface {i}"),
+                                0.0,
+                                830.0 * 0.25,
+                                &mut interface.d1,
+                            );
+                        }
+                    }
                 });
 
             // ui.show_demo_window(&mut imgui.demo_open);
