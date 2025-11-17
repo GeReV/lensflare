@@ -4,12 +4,13 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-wgpu = "25.0"
+winit = "0.30"
+wgpu = { version = "25.0", features = ["naga-ir"] }
+naga_oil = "0.18"
 imgui = "0.12"
 imgui-winit-support = "0.13"
 imgui-wgpu = "0.25"
 anyhow = "1.0"
-winit = "0.30"
 env_logger = "0.11"
 log = "0.4"
 pollster = "0.4"
@@ -20,3 +21,4 @@ itertools = "0.14.0"
 glam = { version = "0.30.9", features = ["default", "encase", "bytemuck"]}
 encase = "0.12.0"
 color = "0.3.2"
+image = "0.25"
