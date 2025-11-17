@@ -2,8 +2,8 @@ This is a work in progress.
 
 This repo is a challenge to try and implement a paper with as little outside help as possible.
 
-I decided to implement the lens flare effect from [Physically-Based Real-Time
-Lens Flare Rendering](https://resources.mpi-inf.mpg.de/lensflareRendering/).
+I decided to implement the lens flare effect from the paper [Physically-Based Real-Time
+Lens Flare Rendering](https://resources.mpi-inf.mpg.de/lensflareRendering/) by Hullin, Eisemann, Seidel and Lee.
 
 ## Development notes
 
