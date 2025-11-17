@@ -297,6 +297,7 @@ impl State {
         let grid_limits_uniform =
             GridLimitsUniform::new(&lenses_uniform.data, &bounces_and_lengths_uniform.data);
 
+        // Generate grids for the following 2^N range of sizes.
         let grids = Grids::new(4..10);
 
         let grid_variances = calculate_grid_triangle_area_variance(
@@ -336,8 +337,6 @@ impl State {
             contents: bytemuck::cast_slice(grids.indices()),
             usage: BufferUsages::INDEX,
         });
-
-        // Generate grids for the following 2^N range of sizes.
 
         // let mut img = image::Rgba32FImage::new(16, 16);
         // for (i, pixel) in img.pixels_mut().enumerate() {
