@@ -1,47 +1,51 @@
 mod arc;
 mod buffer;
 mod camera;
+mod grids;
+mod hot_reload;
 pub mod lenses;
-mod mesh;
 mod registry;
+mod shaders;
 mod software;
 mod uniforms;
 mod vertex;
-mod hot_reload;
 
 use crate::arc::Arc;
 use crate::camera::{Camera, CameraController, Projection};
-use crate::lenses::{parse_lenses};
-use crate::mesh::Mesh;
+use crate::grids::Grids;
+use crate::hot_reload::{HotReloadResult, HotReloadShader};
+use crate::lenses::parse_lenses;
 use crate::registry::{Id, Registry};
-use crate::software::{Ray};
+use crate::shaders::{create_shader, init_composer};
+use crate::software::calculate_grid_triangle_area_variance;
 use crate::uniforms::{
     BouncesAndLengthsUniform, CameraUniform, GridLimitsUniform, ParamsUniform, Uniform,
 };
 use crate::vertex::{ColoredVertex, Vertex};
 use anyhow::*;
-use cgmath::Zero;
+use cgmath::num_traits::real::Real;
+use cgmath::Angle;
 use encase::{StorageBuffer, UniformBuffer};
-use glam::{vec3, vec4, Vec2, Vec3, Vec3Swizzles, Vec4};
-use imgui::{Condition, FontSource, MouseCursor};
+use glam::{vec3, vec4, Vec2, Vec3, Vec3Swizzles, Vec4, Vec4Swizzles};
+use imgui::{Condition, FontSource, MouseCursor, TreeNodeFlags};
 use imgui_wgpu::{Renderer, RendererConfig};
 use imgui_winit_support::WinitPlatform;
-use itertools::Itertools;
-use software::trace_iterator::TraceIterator;
+use itertools::{Itertools, MinMaxResult};
+use naga_oil::compose::{Composer, NagaModuleDescriptor};
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::f32::consts::PI;
-use std::ffi::OsStr;
 use std::path::Path;
-use std::time::{Duration, Instant, SystemTime};
-use uniforms::{LensSystemUniform};
-use wgpu::util::DeviceExt;
-use wgpu::wgt::{TextureViewDescriptor};
+use std::time::{Duration, Instant};
+use uniforms::LensSystemUniform;
+use wgpu::util::{DeviceExt, RenderEncoder};
+use wgpu::wgt::{SamplerDescriptor, TextureDataOrder, TextureDescriptor, TextureViewDescriptor};
 use wgpu::{
-    BindGroupLayout, BlendComponent, BlendState, BufferAddress, BufferUsages, Device, Extent3d,
-    Label, Origin3d, PrimitiveState, PrimitiveTopology, ShaderModule, ShaderModuleDescriptor,
-    ShaderSource, ShaderStages, SurfaceConfiguration, TextureAspect, TextureFormat,
-    TextureSampleType,
+    BindGroupLayout, BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingResource, BindingType,
+    BlendComponent, BlendState, BufferAddress, BufferBindingType, BufferUsages, Device, Extent3d,
+    FilterMode, Label, Origin3d, PrimitiveState, PrimitiveTopology, ShaderModule,
+    ShaderModuleDescriptor, ShaderSource, ShaderStages, SurfaceConfiguration, TextureAspect,
+    TextureDimension, TextureFormat, TextureSampleType, TextureUsages, TextureViewDimension,
 };
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
@@ -52,7 +56,6 @@ use winit::event::{
 use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowId};
-use crate::hot_reload::{HotReloadResult, HotReloadShader};
 
 struct ImguiState {
     context: imgui::Context,
@@ -68,12 +71,6 @@ enum PipelineId {
     Lines,
     Fullscreen,
 }
-
-const GRID_SIZE_LOG2: u32 = 6;
-const GRID_SIZE: u32 = 1 << GRID_SIZE_LOG2;
-const GRID_SIZE_VERTEX_COUNT: u32 = GRID_SIZE + 1;
-const GRID_VERTEX_BUFFER_SIZE: u32 = GRID_SIZE_VERTEX_COUNT * GRID_SIZE_VERTEX_COUNT;
-const GRID_INDEX_BUFFER_SIZE: u32 = GRID_SIZE * GRID_SIZE * 6;
 
 const ADDITIVE_BLEND: BlendState = BlendState {
     color: BlendComponent {
@@ -103,6 +100,7 @@ struct State {
     projection: camera::Projection,
     camera_controller: CameraController,
 
+    composer: Composer,
     hot_reload_shaders: Vec<HotReloadShader>,
 
     // inputs_bind_group: BindGroup<InputsUniform>,
@@ -129,7 +127,11 @@ struct State {
 
     light_angles: Vec4,
 
-    grid_mesh: Mesh,
+    grids: Grids,
+    bounces_grid_log2_sizes: Vec<u32>,
+    grids_vertex_buffer: wgpu::Buffer,
+    grids_index_buffer: wgpu::Buffer,
+
     static_lines_vertices: Vec<ColoredVertex>,
     static_lines_vertex_buffer: wgpu::Buffer,
     ray_lines_vertices: Vec<ColoredVertex>,
@@ -255,46 +257,25 @@ impl State {
 
         let ray_dir = -Vec3::Z;
 
-        let grid_limits_uniform =
-            GridLimitsUniform::new(&lenses_uniform, &bounces_and_lengths_uniform, ray_dir);
-
-        let grid_limits_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Grid Limits Uniform Buffer"),
-            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
-            contents: &StorageBuffer::<GridLimitsUniform>::content_of::<_, Vec<u8>>(
-                &grid_limits_uniform,
-            )?,
-        });
-
         let lenses_bind_group_layout =
-            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            device.create_bind_group_layout(&BindGroupLayoutDescriptor {
                 label: Some("Lenses Bind Group Layout"),
                 entries: &[
-                    wgpu::BindGroupLayoutEntry {
+                    BindGroupLayoutEntry {
                         binding: 0,
-                        visibility: ShaderStages::VERTEX,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Uniform,
+                        visibility: ShaderStages::VERTEX_FRAGMENT,
+                        ty: BindingType::Buffer {
+                            ty: BufferBindingType::Uniform,
                             has_dynamic_offset: false,
                             min_binding_size: None,
                         },
                         count: None,
                     },
-                    wgpu::BindGroupLayoutEntry {
+                    BindGroupLayoutEntry {
                         binding: 1,
-                        visibility: ShaderStages::VERTEX,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Storage { read_only: true },
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
-                    },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 2,
-                        visibility: ShaderStages::VERTEX,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        visibility: ShaderStages::VERTEX_FRAGMENT,
+                        ty: BindingType::Buffer {
+                            ty: BufferBindingType::Storage { read_only: true },
                             has_dynamic_offset: false,
                             min_binding_size: None,
                         },
@@ -314,10 +295,6 @@ impl State {
                 wgpu::BindGroupEntry {
                     binding: 1,
                     resource: bounces_and_lengths_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: grid_limits_buffer.as_entire_binding(),
                 },
             ],
         });
@@ -339,12 +316,69 @@ impl State {
             lenses_bind_group_id.clone(),
         );
 
-        let grid_limits_uniform = Uniform::new(
-            grid_limits_uniform,
-            buffers.add(grid_limits_buffer),
-            lenses_bind_group_layout_id.clone(),
-            lenses_bind_group_id.clone(),
+        let grid_limits_uniform =
+            GridLimitsUniform::new(&lenses_uniform.data, &bounces_and_lengths_uniform.data);
+
+        let grids = Grids::new(4..10);
+
+        let grid_variances = calculate_grid_triangle_area_variance(
+            &lenses_uniform.data,
+            &bounces_and_lengths_uniform.data,
+            &grids.get_grid(1 << 4).unwrap(),
         );
+
+        let MinMaxResult::MinMax(var_min, var_max) = grid_variances.iter().copied().minmax() else {
+            panic!("Invalid variance range");
+        };
+
+        let bounces_grid_log2_sizes = {
+            let grid_sizes = grids.get_grid_sizes();
+            let (var_min, var_max) = (var_min.ln(), var_max.ln());
+
+            grid_variances
+                .iter()
+                .map(|variance| {
+                    let t = (variance.ln() - var_min) / (var_max - var_min);
+
+                    let i = t * (grid_sizes.len() - 1) as f32;
+
+                    grid_sizes[i as usize]
+                })
+                .collect_vec()
+        };
+
+        let grids_vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Grids Vertex Buffer"),
+            contents: bytemuck::cast_slice(grids.vertices()),
+            usage: BufferUsages::VERTEX,
+        });
+
+        let grids_index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Grids Index Buffer"),
+            contents: bytemuck::cast_slice(grids.indices()),
+            usage: BufferUsages::INDEX,
+        });
+
+        // Generate grids for the following 2^N range of sizes.
+
+        // let mut img = image::Rgba32FImage::new(16, 16);
+        // for (i, pixel) in img.pixels_mut().enumerate() {
+        //     let limit = grid_limits_uniform.limits[28][i];
+        //     *pixel = image::Rgba(limit.to_array());
+        // }
+        // let img8 = image::ImageBuffer::from_fn(img.width(), img.height(), |x, y| {
+        //     let p = img.get_pixel(x, y).0.map(|v| ((v + 0.5).clamp(0.0, 1.0) * 65535.0) as u16);
+        //     image::Rgba(p)
+        // });
+        // img8.save("grid_limits.png")?;
+
+        let grid_limits_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Grid Limits Buffer"),
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+            contents: &StorageBuffer::<GridLimitsUniform>::content_of::<_, Vec<u8>>(
+                &grid_limits_uniform,
+            )?,
+        });
 
         let params = ParamsUniform {
             ray_dir,
@@ -361,34 +395,62 @@ impl State {
         });
 
         let params_bind_group_layout =
-            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            device.create_bind_group_layout(&BindGroupLayoutDescriptor {
                 label: Some("Params Bind Group Layout"),
-                entries: &[wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: ShaderStages::VERTEX_FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
+                entries: &[
+                    BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: ShaderStages::VERTEX_FRAGMENT,
+                        ty: BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
                     },
-                    count: None,
-                }],
+                    BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: ShaderStages::VERTEX_FRAGMENT,
+                        ty: BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                ],
             });
 
         let params_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Params Bind Group"),
             layout: &params_bind_group_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: params_buffer.as_entire_binding(),
-            }],
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: params_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: grid_limits_buffer.as_entire_binding(),
+                },
+            ],
         });
+
+        let params_bind_group_layout_id = bind_group_layouts.add(params_bind_group_layout);
+        let params_bind_group_id = bind_groups.add(params_bind_group);
 
         let params_uniform = Uniform::new(
             params,
             buffers.add(params_buffer),
-            bind_group_layouts.add(params_bind_group_layout),
-            bind_groups.add(params_bind_group),
+            params_bind_group_layout_id.clone(),
+            params_bind_group_id.clone(),
+        );
+
+        let grid_limits_uniform = Uniform::new(
+            grid_limits_uniform,
+            buffers.add(grid_limits_buffer),
+            params_bind_group_layout_id.clone(),
+            params_bind_group_id.clone(),
         );
 
         let mut static_lines_vertices = Vec::<ColoredVertex>::new();
@@ -421,10 +483,13 @@ impl State {
             params_uniform.bind_group_layout_id.clone(),
         ];
 
+        let mut composer = init_composer()?;
+
         let mut render_pipelines = HashMap::new();
 
         Self::create_static_render_pipelines(
             &device,
+            &mut composer,
             &mut render_pipelines,
             &default_shader_bind_group_layouts
                 .iter()
@@ -434,24 +499,24 @@ impl State {
 
         let mut hot_reload_shaders = Vec::new();
 
-        hot_reload_shaders.push(HotReloadShader::new("src/shader.wgsl"));
-        hot_reload_shaders.push(HotReloadShader::new("src/fullscreen.wgsl"));
+        hot_reload_shaders.push(HotReloadShader::new("src/shaders/shader.wgsl"));
+        hot_reload_shaders.push(HotReloadShader::new("src/shaders/fullscreen.wgsl"));
 
         let (fullscreen_bind_group_layout_id, fullscreen_bind_group_id) = {
             let fullscreen_bind_group_layout =
-                device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                device.create_bind_group_layout(&BindGroupLayoutDescriptor {
                     label: Some("Render Fullscreen Bind Group Layout"),
                     entries: &[
-                        wgpu::BindGroupLayoutEntry {
+                        BindGroupLayoutEntry {
                             binding: 0,
                             visibility: ShaderStages::FRAGMENT,
-                            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                            ty: BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                             count: None,
                         },
-                        wgpu::BindGroupLayoutEntry {
+                        BindGroupLayoutEntry {
                             binding: 1,
                             visibility: ShaderStages::FRAGMENT,
-                            ty: wgpu::BindingType::Texture {
+                            ty: BindingType::Texture {
                                 sample_type: TextureSampleType::Float { filterable: true },
                                 view_dimension: wgpu::TextureViewDimension::D2,
                                 multisampled: false,
@@ -477,11 +542,11 @@ impl State {
                 entries: &[
                     wgpu::BindGroupEntry {
                         binding: 0,
-                        resource: wgpu::BindingResource::Sampler(&sampler),
+                        resource: BindingResource::Sampler(&sampler),
                     },
                     wgpu::BindGroupEntry {
                         binding: 1,
-                        resource: wgpu::BindingResource::TextureView(&texture_view),
+                        resource: BindingResource::TextureView(&texture_view),
                     },
                 ],
             });
@@ -490,45 +555,6 @@ impl State {
 
             (fullscreen_bind_group_layout_id, fullscreen_bind_group_id)
         };
-
-        let grid_vertices = {
-            let mut grid_vertices =
-                Vec::with_capacity((GRID_SIZE_VERTEX_COUNT * GRID_SIZE_VERTEX_COUNT) as usize);
-
-            for y in 0..GRID_SIZE_VERTEX_COUNT {
-                for x in 0..GRID_SIZE_VERTEX_COUNT {
-                    grid_vertices.push(Vertex {
-                        position: Vec3::new(
-                            x as f32 / GRID_SIZE as f32,
-                            y as f32 / GRID_SIZE as f32,
-                            0.0,
-                        ),
-                    });
-                }
-            }
-
-            grid_vertices
-        };
-
-        let grid_indices: Vec<u32> = {
-            let mut grid_indices = Vec::with_capacity(GRID_INDEX_BUFFER_SIZE as usize);
-
-            for y in 0..GRID_SIZE {
-                for x in 0..GRID_SIZE {
-                    let tl = y * GRID_SIZE_VERTEX_COUNT + x;
-                    grid_indices.push(tl);
-                    grid_indices.push(tl + 1);
-                    grid_indices.push(tl + GRID_SIZE_VERTEX_COUNT + 0);
-                    grid_indices.push(tl + 1);
-                    grid_indices.push(tl + GRID_SIZE_VERTEX_COUNT + 1);
-                    grid_indices.push(tl + GRID_SIZE_VERTEX_COUNT + 0);
-                }
-            }
-
-            grid_indices
-        };
-
-        let grid_mesh = Mesh::new(&device, &grid_vertices, &grid_indices);
 
         let imgui = Self::setup_imgui(&window, &device, &queue, surface_format);
 
@@ -579,6 +605,7 @@ impl State {
 
             default_shader_bind_group_layouts,
 
+            composer,
             hot_reload_shaders,
 
             camera,
@@ -596,7 +623,11 @@ impl State {
 
             light_angles: vec4(0., -PI * 0.5, 0., 0.),
 
-            grid_mesh,
+            grids,
+            bounces_grid_log2_sizes,
+            grids_vertex_buffer,
+            grids_index_buffer,
+
             static_lines_vertices,
             static_lines_vertex_buffer,
             ray_lines_vertices: Vec::with_capacity(1 << 18),
@@ -790,72 +821,83 @@ impl State {
         }
     }
 
-    fn build_ray_traces_debug_lines(
-        lenses_uniform: &LensSystemUniform,
-        bounces_and_lengths: &BouncesAndLengthsUniform,
-        ray_grid_limits: &GridLimitsUniform,
-        line_vertices: &mut Vec<ColoredVertex>,
-        ray_dir: Vec3,
-        ray_count: usize,
-        selected_ray: Option<usize>,
-        selected_bid: Option<usize>,
-        ray_intensity: f32,
-        ray_lambda: f32,
-        ray_step_count: usize,
+    // fn build_ray_traces_debug_lines(
+    //     lenses_uniform: &LensSystemUniform,
+    //     bounces_and_lengths: &BouncesAndLengthsUniform,
+    //     ray_grid_limits: &GridLimitsUniform,
+    //     line_vertices: &mut Vec<ColoredVertex>,
+    //     ray_dir: Vec3,
+    //     ray_count: usize,
+    //     selected_ray: Option<usize>,
+    //     selected_bid: Option<usize>,
+    //     ray_intensity: f32,
+    //     ray_lambda: f32,
+    //     ray_step_count: usize,
+    // ) {
+    //     let entrance = &lenses_uniform.interfaces[0];
+    //
+    //     let ray_range = match selected_ray {
+    //         Some(ray) => ray..ray + 1,
+    //         None => 0..ray_count,
+    //     };
+    //
+    //     let selected_bid = selected_bid.unwrap_or(0);
+    //
+    //     let grid_limits = ray_grid_limits.limits[selected_bid];
+    //
+    //     for i in ray_range {
+    //         let t = i as f32 / (ray_count - 1) as f32;
+    //
+    //         let bottom = grid_limits.br.with_x(0.0);
+    //         let top = grid_limits.tl.with_x(0.0);
+    //         let ray = Ray {
+    //             pos: bottom + (top - bottom) * t + vec3(0.0, 0.0, 0.5),
+    //             dir: ray_dir,
+    //             tex: Vec4::new(0.5, t, entrance.sa, ray_intensity),
+    //             hit_sensor: true,
+    //         };
+    //
+    //         let iter = TraceIterator::new(
+    //             &lenses_uniform.interfaces,
+    //             &bounces_and_lengths.bounces_and_lengths,
+    //             lenses_uniform.aperture_index as usize,
+    //             ray,
+    //             selected_bid,
+    //             ray_lambda,
+    //         );
+    //
+    //         // let color = Hsl::to_linear_srgb([t * 360., 75., 75.]);
+    //         // let color = Vec3::from_array(color).extend(0.3);
+    //
+    //         line_vertices.extend(iter.take(ray_step_count).flat_map(|ray| {
+    //             let color = if ray.intensity.is_zero() {
+    //                 vec4(1.0, 0.0, 0.0, 0.05)
+    //             } else {
+    //                 Vec3::ONE.extend(0.2)
+    //             };
+    //
+    //             [
+    //                 ColoredVertex::new(ray.start, color),
+    //                 ColoredVertex::new(ray.end, color),
+    //             ]
+    //         }));
+    //     }
+    // }
+
+    fn create_static_render_pipelines(
+        device: &Device,
+        composer: &mut Composer,
+        render_pipelines: &mut HashMap<PipelineId, wgpu::RenderPipeline>,
+        default_bind_group_layouts: &Vec<&BindGroupLayout>,
     ) {
-        let entrance = &lenses_uniform.interfaces[0];
-
-        let ray_range = match selected_ray {
-            Some(ray) => ray..ray + 1,
-            None => 0..ray_count,
-        };
-
-        let selected_bid = selected_bid.unwrap_or(0);
-
-        let grid_limits = ray_grid_limits.limits[selected_bid];
-
-        for i in ray_range {
-            let t = i as f32 / (ray_count - 1) as f32;
-
-            let bottom = grid_limits.br.with_x(0.0);
-            let top = grid_limits.tl.with_x(0.0);
-            let ray = Ray {
-                pos: bottom + (top - bottom) * t + vec3(0.0, 0.0, 0.5),
-                dir: ray_dir,
-                tex: Vec4::new(0.5, t, entrance.sa, ray_intensity),
-                hit_sensor: true,
-            };
-
-            let iter = TraceIterator::new(
-                &lenses_uniform.interfaces,
-                &bounces_and_lengths.bounces_and_lengths,
-                lenses_uniform.aperture_index as usize,
-                ray,
-                selected_bid,
-                ray_lambda,
-            );
-
-            // let color = Hsl::to_linear_srgb([t * 360., 75., 75.]);
-            // let color = Vec3::from_array(color).extend(0.3);
-
-            line_vertices.extend(iter.take(ray_step_count).flat_map(|ray| {
-                let color = if ray.intensity.is_zero() {
-                    vec4(1.0, 0.0, 0.0, 0.05)
-                } else {
-                    Vec3::ONE.extend(0.2)
-                };
-
-                [
-                    ColoredVertex::new(ray.start, color),
-                    ColoredVertex::new(ray.end, color),
-                ]
-            }));
-        }
-    }
-
-    fn create_static_render_pipelines(device: &Device, render_pipelines: &mut HashMap<PipelineId, wgpu::RenderPipeline>, default_bind_group_layouts: &Vec<&BindGroupLayout>) {
         {
-            let lines_shader = device.create_shader_module(wgpu::include_wgsl!("lines.wgsl"));
+            let lines_shader = create_shader(
+                device,
+                composer,
+                Some("Render Lines Shader"),
+                Path::new("src/shaders/lines.wgsl"),
+            )
+            .unwrap();
 
             let render_pipeline_lines_layout =
                 device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -921,9 +963,10 @@ impl State {
         }
     }
 
-    fn update_render_pipelines(&mut self) -> Result<()> {
+    fn update_render_pipelines(&mut self) {
         for shader in self.hot_reload_shaders.iter_mut() {
-            let Result::Ok(shader_result) = shader.try_hot_reload(&self.device) else {
+            let Result::Ok(shader_result) = shader.try_hot_reload(&self.device, &mut self.composer)
+            else {
                 continue;
             };
 
@@ -934,23 +977,32 @@ impl State {
 
             if let Some(path) = shader.path.as_os_str().to_str() {
                 match path {
-                    "src/shader.wgsl" => {
-                        let default_bind_group_layouts = self.default_shader_bind_group_layouts.iter()
+                    "src/shaders/shader.wgsl" => {
+                        let default_bind_group_layouts = self
+                            .default_shader_bind_group_layouts
+                            .iter()
                             .map(|id| &self.bind_group_layouts[id])
                             .collect_vec();
 
-                        let render_pipeline_default = Self::create_default_render_pipeline(
+                        match Self::create_default_render_pipeline(
                             &self.device,
                             None,
                             TextureFormat::Rgba16Float,
                             &shader_module,
                             &default_bind_group_layouts,
                             None,
-                        )?;
+                        ) {
+                            Result::Ok(pipeline) => {
+                                shader.shader_last_error = None;
 
-                        self.render_pipelines.insert(PipelineId::Fill, render_pipeline_default);
+                                self.render_pipelines.insert(PipelineId::Fill, pipeline);
+                            }
+                            Err(err) => {
+                                shader.shader_last_error = Some(err.to_string());
+                            }
+                        };
 
-                        let render_pipeline_wireframe = Self::create_default_render_pipeline(
+                        match Self::create_default_render_pipeline(
                             &self.device,
                             Some("Render Wireframe Pipeline"),
                             TextureFormat::Rgba16Float,
@@ -963,68 +1015,80 @@ impl State {
                                 polygon_mode: wgpu::PolygonMode::Line,
                                 ..Default::default()
                             }),
-                        )?;
+                        ) {
+                            Result::Ok(pipeline) => {
+                                shader.shader_last_error = None;
 
-                        self.render_pipelines.insert(PipelineId::Wireframe, render_pipeline_wireframe);
+                                self.render_pipelines
+                                    .insert(PipelineId::Wireframe, pipeline);
+                            }
+                            Err(err) => {
+                                shader.shader_last_error = Some(err.to_string());
+                            }
+                        };
                     }
-                    "src/fullscreen.wgsl" => {
+                    "src/shaders/fullscreen.wgsl" => {
                         let render_pipeline_layout =
-                            self.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                                label: Some("Render Fullscreen Pipeline Layout"),
-                                bind_group_layouts: &[&self.bind_group_layouts[&self.fullscreen_bind_group_layout_id]],
-                                push_constant_ranges: &[],
-                            });
+                            self.device
+                                .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                                    label: Some("Render Fullscreen Pipeline Layout"),
+                                    bind_group_layouts: &[&self.bind_group_layouts
+                                        [&self.fullscreen_bind_group_layout_id]],
+                                    push_constant_ranges: &[],
+                                });
 
                         let render_pipeline_fullscreen =
-                            self.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                                label: Some("Render Fullscreen Pipeline"),
-                                layout: Some(&render_pipeline_layout),
-                                vertex: wgpu::VertexState {
-                                    module: &shader_module,
-                                    entry_point: Some("vs_main"),
-                                    buffers: &[],
-                                    compilation_options: wgpu::PipelineCompilationOptions::default(),
-                                },
-                                fragment: Some(wgpu::FragmentState {
-                                    module: &shader_module,
-                                    entry_point: Some("fs_main"),
-                                    targets: &[Some(wgpu::ColorTargetState {
-                                        format: self.config.format,
-                                        blend: Some(BlendState::REPLACE),
-                                        write_mask: wgpu::ColorWrites::ALL,
-                                    })],
-                                    compilation_options: wgpu::PipelineCompilationOptions::default(),
-                                }),
-                                primitive: PrimitiveState {
-                                    topology: PrimitiveTopology::TriangleList,
-                                    strip_index_format: None,
-                                    front_face: wgpu::FrontFace::Cw,
-                                    cull_mode: Some(wgpu::Face::Back),
-                                    // Setting this to anything other than Fill requires Features::NON_FILL_POLYGON_MODE
-                                    polygon_mode: wgpu::PolygonMode::Fill,
-                                    // Requires Features::DEPTH_CLIP_CONTROL
-                                    unclipped_depth: false,
-                                    // Requires Features::CONSERVATIVE_RASTERIZATION
-                                    conservative: false,
-                                },
-                                depth_stencil: None,
-                                multisample: wgpu::MultisampleState {
-                                    count: 1,
-                                    mask: !0,
-                                    alpha_to_coverage_enabled: false,
-                                },
-                                multiview: None,
-                                cache: None,
-                            });
+                            self.device
+                                .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                                    label: Some("Render Fullscreen Pipeline"),
+                                    layout: Some(&render_pipeline_layout),
+                                    vertex: wgpu::VertexState {
+                                        module: &shader_module,
+                                        entry_point: Some("vs_main"),
+                                        buffers: &[],
+                                        compilation_options:
+                                            wgpu::PipelineCompilationOptions::default(),
+                                    },
+                                    fragment: Some(wgpu::FragmentState {
+                                        module: &shader_module,
+                                        entry_point: Some("fs_main"),
+                                        targets: &[Some(wgpu::ColorTargetState {
+                                            format: self.config.format,
+                                            blend: Some(BlendState::REPLACE),
+                                            write_mask: wgpu::ColorWrites::ALL,
+                                        })],
+                                        compilation_options:
+                                            wgpu::PipelineCompilationOptions::default(),
+                                    }),
+                                    primitive: PrimitiveState {
+                                        topology: PrimitiveTopology::TriangleList,
+                                        strip_index_format: None,
+                                        front_face: wgpu::FrontFace::Cw,
+                                        cull_mode: Some(wgpu::Face::Back),
+                                        // Setting this to anything other than Fill requires Features::NON_FILL_POLYGON_MODE
+                                        polygon_mode: wgpu::PolygonMode::Fill,
+                                        // Requires Features::DEPTH_CLIP_CONTROL
+                                        unclipped_depth: false,
+                                        // Requires Features::CONSERVATIVE_RASTERIZATION
+                                        conservative: false,
+                                    },
+                                    depth_stencil: None,
+                                    multisample: wgpu::MultisampleState {
+                                        count: 1,
+                                        mask: !0,
+                                        alpha_to_coverage_enabled: false,
+                                    },
+                                    multiview: None,
+                                    cache: None,
+                                });
 
-                        self.render_pipelines.insert(PipelineId::Fullscreen, render_pipeline_fullscreen);
-                    },
+                        self.render_pipelines
+                            .insert(PipelineId::Fullscreen, render_pipeline_fullscreen);
+                    }
                     _ => {}
                 }
             }
         }
-
-        Ok(())
     }
 
     fn create_default_render_pipeline<'shader>(
@@ -1203,7 +1267,7 @@ impl State {
             .write_buffer(&self.queue, &self.buffers)
             .unwrap();
 
-        self.update_render_pipelines().unwrap();
+        self.update_render_pipelines();
 
         if self.debug_mode {
             self.ray_lines_vertices.clear();
@@ -1269,7 +1333,7 @@ impl State {
 
         let view = self
             .render_target
-            .create_view(&wgpu::TextureViewDescriptor::default());
+            .create_view(&TextureViewDescriptor::default());
 
         let mut encoder = self
             .device
@@ -1306,24 +1370,37 @@ impl State {
                 render_pass.set_bind_group(i as u32, &self.bind_groups[bind_group_id], &[]);
             }
 
-            self.grid_mesh.bind(&mut render_pass);
-
             let pipeline = if self.params_uniform.data.wireframe == 1 {
                 PipelineId::Wireframe
             } else {
                 PipelineId::Fill
             };
 
-            render_pass.set_pipeline(&self.render_pipelines[&pipeline]);
+            render_pass.set_vertex_buffer(0, self.grids_vertex_buffer.slice(..));
+            render_pass
+                .set_index_buffer(self.grids_index_buffer.slice(..), wgpu::IndexFormat::Uint32);
 
-            let bounce_count = if self.params_uniform.data.bid < 0 {
-                self.lenses_uniform.data.bounce_count
-            } else {
-                1
-            };
+            if let Some(render_pipeline) = self.render_pipelines.get(&pipeline) {
+                render_pass.set_pipeline(render_pipeline);
 
-            self.grid_mesh
-                .draw_instanced(&mut render_pass, 3 * bounce_count);
+                let selected_bid = self.params_uniform.data.bid;
+                let bounce_range = if selected_bid < 0 {
+                    0..self.lenses_uniform.data.bounce_count
+                } else {
+                    selected_bid as u32..(selected_bid + 1) as u32
+                };
+
+                for bid in bounce_range {
+                    let grid_size = self.bounces_grid_log2_sizes[bid as usize] as usize;
+
+                    let (_, index_range) =
+                        self.grids.get_grid_size_index_ranges(grid_size).unwrap();
+
+                    render_pass.draw_indexed(index_range, 0, (bid * 3)..(bid + 1) * 3);
+                }
+
+                self.params_uniform.data.bid = selected_bid;
+            }
         }
 
         {
@@ -1348,20 +1425,6 @@ impl State {
             );
 
             render_pass.set_pipeline(&self.render_pipelines[&PipelineId::Lines]);
-
-            self.ray_lines_vertices.clear();
-            self.ray_lines_vertices
-                .push(ColoredVertex::new(Vec3::ZERO, Vec3::ONE.extend(0.25)));
-            self.ray_lines_vertices.push(ColoredVertex::new(
-                self.params_uniform.data.ray_dir,
-                Vec3::ONE.extend(0.25),
-            ));
-
-            self.queue.write_buffer(
-                &self.ray_lines_vertex_buffer,
-                0,
-                bytemuck::cast_slice(&self.ray_lines_vertices),
-            );
 
             if self.draw_axes {
                 render_pass.set_vertex_buffer(0, self.static_lines_vertex_buffer.slice(..));
@@ -1463,8 +1526,15 @@ impl State {
         let ui = imgui.context.frame();
 
         {
-            if let Some(shader) = self.hot_reload_shaders.iter().find(|shader| shader.shader_last_error.is_some()) {
-                let window = ui.window(format!("Shader Error: {}", &shader.path.as_os_str().to_string_lossy()));
+            if let Some(shader) = self
+                .hot_reload_shaders
+                .iter()
+                .find(|shader| shader.shader_last_error.is_some())
+            {
+                let window = ui.window(format!(
+                    "Shader Error: {}",
+                    &shader.path.as_os_str().to_string_lossy()
+                ));
                 window
                     .position_pivot([1.0, 0.0])
                     .position(
@@ -1517,6 +1587,11 @@ impl State {
                     // // let mouse_point = point_on_unit_sphere(mouse_point);
                     // ui.text(format!("Mouse Normalized: {:.1?}", mouse_point));
 
+                    // ui.separator();
+                    // let vec = self.grid_variances.1.iter().copied().map(|x| x.log2()).sorted_by(|a, b| a.total_cmp(b)).collect_vec();
+                    // ui.plot_lines("Grid Triangles Area Variance", &vec)
+                    //     .build();
+
                     ui.separator();
                     ui.group(|| {
                         ui.radio_button("Flare", &mut self.debug_mode, false);
@@ -1541,7 +1616,7 @@ impl State {
                         bounces_and_length.x, bounces_and_length.y, bounces_and_length.z
                     ));
 
-                    let max_bounces = self.lenses_uniform.data.bounce_count as i32;
+                    let max_bounces = (self.lenses_uniform.data.bounce_count - 1) as i32;
 
                     ui.slider(
                         "Bounce ID",
@@ -1753,27 +1828,6 @@ impl ApplicationHandler<State> for App {
             &Event::DeviceEvent { device_id, event },
         );
     }
-}
-
-pub fn create_shader<'a>(
-    device: &Device,
-    label: Label,
-    source: impl Into<Cow<'a, str>>,
-) -> Result<ShaderModule> {
-    device.push_error_scope(wgpu::ErrorFilter::Validation);
-
-    let label = label.unwrap_or("Default Render Pipeline");
-
-    let shader = device.create_shader_module(ShaderModuleDescriptor {
-        label: Some(&format!("{label} Shader")),
-        source: ShaderSource::Wgsl(source.into()),
-    });
-
-    if let Some(error) = pollster::block_on(device.pop_error_scope()) {
-        return Err(Error::new(error));
-    }
-
-    Ok(shader)
 }
 
 pub fn run() -> Result<()> {

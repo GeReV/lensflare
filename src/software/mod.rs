@@ -1,7 +1,9 @@
+use crate::grids::Grid;
 use crate::uniforms::{
-    BouncesAndLengthsUniform, GridLimits, LensInterfaceUniform as LensInterface, LensSystemUniform,
+    BouncesAndLengthsUniform, LensInterfaceUniform as LensInterface, LensSystemUniform,
 };
-use glam::{vec3, UVec3, Vec3, Vec3Swizzles, Vec4};
+use glam::{vec2, vec4, UVec3, Vec3, Vec3Swizzles, Vec4, Vec4Swizzles};
+use itertools::Itertools;
 use std::f32::consts::PI;
 
 pub mod trace_iterator;
@@ -39,7 +41,7 @@ fn refract(e1: Vec3, e2: Vec3, n: f32) -> Vec3 {
 fn fresnel_anti_reflect(
     theta0: f32, // angle of incidence
     lambda: f32, // wavelength of ray
-    d1: f32,     // thickness of anti-reflection coating
+    d: f32,      // thickness of anti-reflection coating
     n0: f32,     // RI (refr. index) of 1st medium
     n1: f32,     // RI of coating layer
     n2: f32,     // RI of the 2nd medium
@@ -64,7 +66,7 @@ fn fresnel_anti_reflect(
     let rip = tp01 * tp01 * rp12;
 
     // phase difference between outer and inner reflections
-    let dy = d1 * n1;
+    let dy = d * n1;
     let dx = (theta1.tan()) * dy;
     let delay = (dx * dx + dy * dy).sqrt();
     let rel_phase = 4.0 * PI / lambda * (delay - dx * (theta0.sin()));
@@ -210,8 +212,9 @@ pub fn trace(
             }
         } else {
             // reflection with anti-reflection coating
+            let d = f.d1;
             ray.dir = reflect(ray.dir, i.norm);
-            let anti_ref = fresnel_anti_reflect(i.theta, lambda, f.d1, n0, n1, n2);
+            let anti_ref = fresnel_anti_reflect(i.theta, lambda, d, n0, n1, n2);
             ray.tex.w *= anti_ref; // update ray intensity
         }
 
@@ -242,12 +245,7 @@ fn search_ray_grid_limits(
     let mut ray = Ray {
         pos: outer - ray_dir,
         dir: ray_dir,
-        tex: Vec4::new(
-            0.5,
-            0.5,
-            (outer - inner).length(),
-            1.0,
-        ),
+        tex: Vec4::new(0.5, 0.5, 1.0, 1.0),
         hit_sensor: true,
     };
 
@@ -263,8 +261,9 @@ fn search_ray_grid_limits(
             lenses_uniform.aperture_index as usize,
         );
 
-        const EPSILON: f32 = 0.1;
-        if out_ray.hit_sensor && (0.0..EPSILON).contains(&(out_ray.tex.z - 1.0)) {
+        const EPSILON: f32 = 0.2;
+        if out_ray.hit_sensor && (0.0..EPSILON).contains(&(out_ray.tex.xy().length_squared() - 1.0))
+        {
             break;
         }
 
@@ -285,39 +284,103 @@ pub fn build_ray_grid_limits(
     bounces_and_lengths: &BouncesAndLengthsUniform,
     ray_dir: Vec3,
     selected_bid: usize,
-) -> GridLimits {
+) -> Vec4 {
     let entrance = &lenses_uniform.interfaces[0];
 
     let lens_center = entrance.center;
 
-    let grid_limit_tl = {
-        let outer = lens_center + vec3(1.0, 1.0, 0.0) * 0.5 * entrance.sa;
+    let offsets = [
+        vec2(-1.0, 0.0), // Left
+        vec2(0.0, -1.0), // Top,
+        vec2(1.0, 0.0),  // Right
+        vec2(0.0, 1.0),  // Bottom
+    ];
 
-        search_ray_grid_limits(
-            &lenses_uniform,
-            &bounces_and_lengths,
-            selected_bid,
-            ray_dir,
-            outer,
-            lens_center,
-        )
-    };
+    let limits = offsets
+        .into_iter()
+        .map(|offset| {
+            let outer = lens_center + offset.extend(0.0) * 0.5 * entrance.sa;
 
-    let grid_limit_br = {
-        let outer = lens_center - vec3(1.0, 1.0, 0.0) * 0.5 * entrance.sa;
+            search_ray_grid_limits(
+                &lenses_uniform,
+                &bounces_and_lengths,
+                selected_bid,
+                ray_dir,
+                outer,
+                lens_center,
+            )
+        })
+        .collect_vec();
 
-        search_ray_grid_limits(
-            &lenses_uniform,
-            &bounces_and_lengths,
-            selected_bid,
-            ray_dir,
-            outer,
-            lens_center,
-        )
-    };
+    vec4(limits[0].x, limits[1].y, limits[2].x, limits[3].y)
+}
 
-    GridLimits {
-        tl: grid_limit_tl,
-        br: grid_limit_br,
+pub fn calculate_grid_triangle_area_variance(
+    lenses_uniform: &LensSystemUniform,
+    bounces_and_lengths: &BouncesAndLengthsUniform,
+    grid: &Grid<'_>,
+) -> Vec<f32> {
+    let mut results = Vec::with_capacity(lenses_uniform.bounce_count as usize);
+
+    let entrance = &lenses_uniform.interfaces[0];
+
+    let entrance_center = entrance.center;
+
+    let size = grid.size();
+
+    for bid in 0..results.capacity() {
+        let traced_vertices = grid
+            .vertices
+            .iter()
+            .map(|&v| {
+                let mut ray_pos = v;
+                ray_pos -= 0.5;
+                ray_pos *= 0.5 * entrance.sa;
+
+                let ray_pos = ray_pos.with_z(entrance_center.z);
+
+                let ray = Ray {
+                    pos: ray_pos,
+                    dir: -Vec3::Z,
+                    tex: Vec4::new(0.5, 0.5, 1.0, 1.0),
+                    hit_sensor: true,
+                };
+
+                let out_ray = trace(
+                    bid,
+                    &ray,
+                    500.0,
+                    &lenses_uniform.interfaces,
+                    &bounces_and_lengths.bounces_and_lengths,
+                    lenses_uniform.aperture_index as usize,
+                );
+
+                out_ray.pos
+            })
+            .collect_vec();
+
+        let traced_grid = Grid::new(size, &traced_vertices, &grid.indices);
+
+        let triangle_areas = traced_grid
+            .triangles()
+            .map(|tri| {
+                let ab = tri[1] - tri[0];
+                let ac = tri[2] - tri[0];
+
+                ab.cross(ac).length() * 0.5
+            })
+            .collect_vec();
+
+        let n = triangle_areas.len() as f32;
+        let average = triangle_areas.iter().sum::<f32>() / n;
+        let variance = triangle_areas
+            .iter()
+            .map(|x| (x - average).powi(2))
+            .sum::<f32>()
+            / n;
+
+        results.push(variance);
     }
+
+    results
 }

@@ -5,8 +5,9 @@ use crate::software::build_ray_grid_limits;
 use anyhow::format_err;
 use cgmath::Zero;
 use encase::internal::WriteInto;
-use encase::{ShaderType, UniformBuffer};
-use glam::{Mat4, UVec3, Vec3, Vec4};
+use encase::{ArrayLength, ShaderType, UniformBuffer};
+use glam::{vec2, vec3, vec4, Mat4, UVec3, Vec3, Vec4};
+use std::f32::consts::PI;
 
 const NUM_INTERFACES: usize = 32;
 const NUM_BOUNCES: usize = NUM_INTERFACES * (NUM_INTERFACES - 1) / 2;
@@ -132,7 +133,7 @@ impl From<&Vec<LensInterface>> for LensSystemUniform {
         let mut offset = 0.0;
         let mut prev_thickness = 0.0;
 
-        const SCALE_FACTOR: f32 = 1e-2;
+        const SCALE_FACTOR: f32 = 1e-3;
 
         result.interfaces[0] = LensInterfaceUniform {
             center: Vec3::ZERO,
@@ -174,6 +175,17 @@ impl From<&Vec<LensInterface>> for LensSystemUniform {
             prev_refr_index = result.interfaces[i + 1].n.z;
             prev_thickness = lens.axis_position * SCALE_FACTOR;
         }
+
+        let last_lens = &result.interfaces[lenses.len()];
+
+        result.interfaces[1 + lenses.len()] = LensInterfaceUniform {
+            center: last_lens.center + vec3(0.0, 0.0, last_lens.radius - prev_thickness),
+            radius: 0.0,
+            n: Vec3::ONE,
+            sa: 0.0,
+            d1: 0.0,
+            flat_surface: 1,
+        };
 
         result
     }
@@ -223,31 +235,56 @@ pub struct ParamsUniform {
     pub wireframe: u32,
 }
 
-#[repr(C)]
-#[derive(Debug, Clone, Copy, Default, ShaderType)]
-pub struct GridLimits {
-    pub tl: Vec3,
-    pub br: Vec3,
-}
+const N: usize = 16;
 
 #[repr(C)]
-#[derive(Debug, Clone, Copy, ShaderType)]
+#[derive(Debug, Clone, ShaderType)]
 pub struct GridLimitsUniform {
-    pub limits: [GridLimits; NUM_BOUNCES],
+    pub length: ArrayLength,
+    #[shader(size(runtime))]
+    pub limits: Vec<Vec4>,
 }
 
 impl GridLimitsUniform {
     pub fn new(
         lenses_uniform: &LensSystemUniform,
         bounces_and_lengths: &BouncesAndLengthsUniform,
-        ray_dir: Vec3,
     ) -> Self {
         let mut result = Self {
-            limits: [Default::default(); NUM_BOUNCES],
+            length: ArrayLength,
+            limits: Vec::with_capacity(NUM_BOUNCES),
         };
 
-        for i in 0..lenses_uniform.bounce_count as usize {
-            result.limits[i] = build_ray_grid_limits(lenses_uniform, bounces_and_lengths, ray_dir, i);
+        for bid in 0..lenses_uniform.bounce_count as usize {
+            // Start from an inverted grid (1.0-to-negative-1.0) so we can use min and max.
+            let mut grid = vec4(1.0, 1.0, -1.0, -1.0);
+
+            for y in 0..N {
+                let v = y as f32 / (N - 1) as f32;
+
+                for x in 0..N {
+                    let u = x as f32 / (N - 1) as f32;
+
+                    // if vec2(u, v).length_squared() > 1.0 {
+                    //     continue;
+                    // }
+
+                    let (sin_pitch, cos_pitch) = ((0.5 - v) * PI).sin_cos();
+                    let (sin_yaw, cos_yaw) = ((u - 0.5) * PI).sin_cos();
+
+
+                    let ray_dir = vec3(sin_yaw * cos_pitch, sin_pitch, cos_yaw * cos_pitch).normalize();
+
+                    let limits = build_ray_grid_limits(lenses_uniform, bounces_and_lengths, ray_dir, bid);
+
+                    grid[0] = grid[0].max(limits[0]);
+                    grid[1] = grid[1].max(limits[1]);
+                    grid[2] = grid[2].min(limits[2]);
+                    grid[3] = grid[3].min(limits[3]);
+                }
+            }
+
+            result.limits.push(grid);
         }
 
         result

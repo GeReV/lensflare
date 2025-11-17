@@ -1,7 +1,8 @@
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
+use naga_oil::compose::Composer;
 use wgpu::{Device, ShaderModule};
-use crate::create_shader;
+use crate::shaders::create_shader;
 
 pub enum HotReloadResult {
     Updated(ShaderModule),
@@ -25,7 +26,7 @@ impl HotReloadShader {
         }
     }
 
-    pub fn try_hot_reload(&mut self, device: &Device) -> anyhow::Result<HotReloadResult> {
+    pub fn try_hot_reload(&mut self, device: &Device, composer: &mut Composer) -> anyhow::Result<HotReloadResult> {
         if self.shader_last_compilation_check.elapsed()? <= Duration::from_secs(1) {
             return Ok(HotReloadResult::Unchanged);
         }
@@ -38,9 +39,7 @@ impl HotReloadShader {
         if modified > self.shader_last_modification {
             self.shader_last_modification = SystemTime::now();
 
-            let shader_source = std::fs::read_to_string(&self.path)?;
-
-            return match create_shader(device, Some(&format!("Shader {}", self.path.display())), &shader_source) {
+            return match create_shader(device, composer, Some(&format!("Shader {}", self.path.display())), &self.path) {
                 Ok(shader) => {
                     self.shader_last_error = None;
 
