@@ -46,9 +46,12 @@ shape of an aperture "blade." It also skips the part of creating the ringing of 
 
 ![](screenshots/wip02.png)
 
-At this point, however, I'm still getting some artifacts in the ghosts due to the grids folding over themselves. 
+At this point, however, I'm still getting some artifacts in the ghosts due to the grids folding over themselves.
 The paper doesn't make clear how this is supposed to be handled, specifically with regard to the rendering pass of each
 ghost.
+
+![](screenshots/wip03.png)
+![](screenshots/wip04.png)
 
 I tried finding existing implementations of the paper, just to get a feeling for how different their code is from the 
 direction I'm taking, without actually diving into the weeds and seeing any spoilers.
