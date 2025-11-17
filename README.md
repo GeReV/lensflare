@@ -18,6 +18,8 @@ Should have made sure the derived data can work with the unmodified tracing algo
 Instead, I started off by translating the code from the supplementary material of the paper and threw everything at it,
 trying to see what will stick.
 
+### 2025-11-11
+
 Continued fiddling is starting to show some results that seem promising, but still incorrect, as can be seen below.
 
 The part of the code that tries to limit the grid of traced rays to the dimensions that are certain to reach the sensor
@@ -32,3 +34,25 @@ couple of hours. It sped up my iteration times quite a bit.
 My next steps are to improve the code to shrink the grids as mentioned above, and adding some UI elements that will allow
 me to play around with the `d1` parameter responsible for the anti-reflection coating of the lenses, to get some color 
 into this.
+
+After adding UI elements to control the `d1` parameters, adding code to select different resolutions for the ray grids 
+and further improving the rendering, I think the behavior of the lens flare looks about right.
+
+### 2025-11-17
+
+At the moment, the shape of the ghosts, representing the shape of the aperture, is simply done by using a signed distance
+field equation for a hexagon. This is different to the method used by the paper, of creating a texture by repeating the 
+shape of an aperture "blade." It also skips the part of creating the ringing of the ghosts with FFTs.
+
+![](screenshots/wip02.png)
+
+At this point, however, I'm still getting some artifacts in the ghosts due to the grids folding over themselves. 
+The paper doesn't make clear how this is supposed to be handled, specifically with regard to the rendering pass of each
+ghost.
+
+I tried finding existing implementations of the paper, just to get a feeling for how different their code is from the 
+direction I'm taking, without actually diving into the weeds and seeing any spoilers.
+
+From a quick glance at the structure of [this GitHub repository](https://github.com/Peiteng/Physically-Based-Realtime-Lens-Flare),
+it looks like their implementation is quite far off from mine. I am considering taking a deeper look at their code to at
+least understand how the ghost rendering pass is supposed to work.
