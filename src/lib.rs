@@ -97,7 +97,7 @@ struct State {
     render_target: wgpu::Texture,
 
     camera: Camera,
-    projection: camera::Projection,
+    projection: Projection,
     camera_controller: CameraController,
 
     composer: Composer,
@@ -202,7 +202,7 @@ impl State {
         let mut bind_group_layouts: Registry<wgpu::BindGroupLayout> = Registry::new();
         let mut bind_groups: Registry<wgpu::BindGroup> = Registry::new();
 
-        let size = wgpu::Extent3d {
+        let size = Extent3d {
             width: config.width.max(1),
             height: config.height.max(1),
             depth_or_array_layers: 1,
@@ -212,28 +212,36 @@ impl State {
             size,
             mip_level_count: 1,
             sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
+            dimension: TextureDimension::D2,
             format: TextureFormat::Rgba16Float,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            usage: TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         };
 
         let render_target = device.create_texture(&desc);
-
-        let (projection, camera, camera_controller, camera_uniform) = Self::create_camera(
-            &device,
-            &config,
-            &mut buffers,
-            &mut bind_group_layouts,
-            &mut bind_groups,
-        )?;
 
         let lenses = parse_lenses(include_str!("../lenses/wide.22mm.dat"))
             .map_err(|e| format_err!("Failed to parse lenses: {}", e))?;
 
         let mut lenses_uniform = LensSystemUniform::from(&lenses);
 
-        lenses_uniform.interfaces[1].d1 = 96.4;
+        lenses_uniform.interfaces[2].d1 = 96.4;
+
+        // Lens at interface_count - 1 is the sensor.
+        let last_lens = &lenses_uniform.interfaces[lenses_uniform.interface_count as usize];
+
+        let view_angle = cgmath::Deg(38.0);
+
+        let projection = Projection::new(config.width, config.height, view_angle, 0.01, 100.0);
+
+        let (camera, camera_controller, camera_uniform) = Self::create_camera(
+            &device,
+            &projection,
+            &mut buffers,
+            &mut bind_group_layouts,
+            &mut bind_groups,
+            -last_lens.center.z,
+        )?;
 
         let lenses_uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Lens System Uniform Buffer"),
@@ -649,23 +657,20 @@ impl State {
 
     fn create_camera(
         device: &Device,
-        config: &SurfaceConfiguration,
+        projection: &Projection,
         buffers: &mut Registry<wgpu::Buffer>,
         bind_group_layouts: &mut Registry<BindGroupLayout>,
         bind_groups: &mut Registry<wgpu::BindGroup>,
-    ) -> Result<(Projection, Camera, CameraController, Uniform<CameraUniform>), Error> {
-        let projection =
-            camera::Projection::new(config.width, config.height, cgmath::Deg(45.0), 0.1, 100.0);
-
+        camera_distance: f32,
+    ) -> Result<(Camera, CameraController, Uniform<CameraUniform>), Error> {
         // For a 45 degree projection, having the same distance as the closest lens' radius should
         // have it exactly cover the "sensor".
-        let camera_distance = 0.17996 * 0.5;
         let camera = Camera::new(
             (0.0, 0.0, -camera_distance), // target at world origin
             cgmath::Deg(90.0),            // yaw
             cgmath::Deg(0.0),             // pitch
         );
-        let camera_controller = CameraController::new(4.0, 1.75);
+        let camera_controller = CameraController::new(0.05, 1.75);
 
         let camera_uniform = CameraUniform::from_camera_and_projection(&camera, &projection);
 
@@ -676,13 +681,13 @@ impl State {
         });
 
         let camera_bind_group_layout =
-            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            device.create_bind_group_layout(&BindGroupLayoutDescriptor {
                 label: Some("Camera Bind Group Layout"),
-                entries: &[wgpu::BindGroupLayoutEntry {
+                entries: &[BindGroupLayoutEntry {
                     binding: 0,
                     visibility: ShaderStages::VERTEX,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Uniform,
                         has_dynamic_offset: false,
                         min_binding_size: None,
                     },
@@ -705,7 +710,7 @@ impl State {
             bind_group_layouts.add(camera_bind_group_layout),
             bind_groups.add(camera_bind_group),
         );
-        Ok((projection, camera, camera_controller, camera_uniform))
+        Ok((camera, camera_controller, camera_uniform))
     }
 
     fn build_lens_system_debug_lines(
@@ -1298,24 +1303,58 @@ impl State {
                 selected_bid,
             );
 
-            let lens_center = self.lenses_uniform.data.interfaces[0].center;
+            // let lens_center = self.lenses_uniform.data.interfaces[0].center;
 
-            let ray_dir = (lens_center - self.params_uniform.data.ray_dir).normalize();
+            // let ray_dir = (lens_center - self.params_uniform.data.ray_dir).normalize();
 
-            Self::build_ray_traces_debug_lines(
-                &self.lenses_uniform.data,
-                &self.bounces_and_lengths_uniform.data,
-                &self.grid_limits_uniform.data,
-                &mut self.ray_lines_vertices,
-                ray_dir,
-                DEBUG_RAY_COUNT as usize,
-                selected_ray,
-                selected_bid,
-                1.0,
-                520.0,
-                self.ray_step_count,
-            );
+            // Self::build_ray_traces_debug_lines(
+            //     &self.lenses_uniform.data,
+            //     &self.bounces_and_lengths_uniform.data,
+            //     &self.grid_limits_uniform.data,
+            //     &mut self.ray_lines_vertices,
+            //     ray_dir,
+            //     DEBUG_RAY_COUNT as usize,
+            //     selected_ray,
+            //     selected_bid,
+            //     1.0,
+            //     520.0,
+            //     self.ray_step_count,
+            // );
+        }
 
+        {
+            self.ray_lines_vertices
+                .push(ColoredVertex::new(Vec3::ZERO, Vec3::ONE.extend(0.25)));
+            self.ray_lines_vertices.push(ColoredVertex::new(
+                self.params_uniform.data.ray_dir,
+                Vec3::ONE.extend(0.25),
+            ));
+
+            let lens = &self.lenses_uniform.data.interfaces
+                [self.lenses_uniform.data.interface_count as usize - 1];
+            let arc_verts = Arc::circle(lens.center.xy(), lens.sa * 0.5)
+                .iter(32)
+                .collect::<Vec<_>>();
+
+            let arc_verts = arc_verts[..]
+                .windows(2)
+                .flat_map(|a| {
+                    [
+                        ColoredVertex::new(
+                            Vec3::new(a[0].x, a[0].y, lens.center.z),
+                            Vec3::Z.extend(0.2),
+                        ),
+                        ColoredVertex::new(
+                            Vec3::new(a[1].x, a[1].y, lens.center.z),
+                            Vec3::Z.extend(0.2),
+                        ),
+                    ]
+                })
+                .collect::<Vec<_>>();
+
+            self.ray_lines_vertices.extend(arc_verts);
+        }
+        if !self.ray_lines_vertices.is_empty() {
             self.queue.write_buffer(
                 &self.ray_lines_vertex_buffer,
                 0,
@@ -1805,7 +1844,7 @@ impl ApplicationHandler<State> for App {
                     }
 
                     if state.mouse_right_pressed {
-                        let delta = Vec2::new(delta.1 as f32, delta.0 as f32) * 0.001;
+                        let delta = Vec2::new(-delta.1 as f32, delta.0 as f32) * 0.001;
 
                         let mut l = state.light_angles;
 
