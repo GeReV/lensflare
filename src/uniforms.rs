@@ -228,11 +228,12 @@ impl BouncesAndLengthsUniform {
 #[repr(C)]
 #[derive(Debug, Clone, Copy, ShaderType)]
 pub struct ParamsUniform {
+    pub debug_wireframe_alpha: f32,
+    pub debug_interpolate: f32,
     pub ray_dir: Vec3,
     pub bid: i32,
     pub intensity: f32,
     pub lambda: f32,
-    pub wireframe: u32,
 }
 
 const N: usize = 16;

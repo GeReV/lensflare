@@ -58,6 +58,8 @@ const ADDITIVE_BLEND: BlendState = BlendState {
     },
 };
 
+const MIN_GRID_LOG2_SIZE: usize = 5;
+
 pub struct State {
     surface: Surface<'static>,
     device: Device,
@@ -233,6 +235,21 @@ impl State {
                 )?,
             });
 
+        // Generate grids for the following 2^N range of sizes.
+        let grids = Grids::new(MIN_GRID_LOG2_SIZE..10);
+
+        let grids_vertex_buffer = device.create_buffer_init(&BufferInitDescriptor {
+            label: Some("Grids Vertex Buffer"),
+            contents: bytemuck::cast_slice(grids.vertices()),
+            usage: BufferUsages::VERTEX | BufferUsages::STORAGE,
+        });
+
+        let grids_index_buffer = device.create_buffer_init(&BufferInitDescriptor {
+            label: Some("Grids Index Buffer"),
+            contents: bytemuck::cast_slice(grids.indices()),
+            usage: BufferUsages::INDEX | BufferUsages::STORAGE,
+        });
+
         let ray_dir = -Vec3::Z;
 
         let lenses_bind_group_layout =
@@ -259,6 +276,26 @@ impl State {
                         },
                         count: None,
                     },
+                    BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: ShaderStages::VERTEX_FRAGMENT,
+                        ty: BindingType::Buffer {
+                            ty: BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    BindGroupLayoutEntry {
+                        binding: 3,
+                        visibility: ShaderStages::VERTEX_FRAGMENT,
+                        ty: BindingType::Buffer {
+                            ty: BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
                 ],
             });
 
@@ -273,6 +310,14 @@ impl State {
                 BindGroupEntry {
                     binding: 1,
                     resource: bounces_and_lengths_buffer.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: 2,
+                    resource: grids_vertex_buffer.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: 3,
+                    resource: grids_index_buffer.as_entire_binding(),
                 },
             ],
         });
@@ -297,13 +342,10 @@ impl State {
         let grid_limits_uniform =
             GridLimitsUniform::new(&lenses_uniform.data, &bounces_and_lengths_uniform.data);
 
-        // Generate grids for the following 2^N range of sizes.
-        let grids = Grids::new(4..10);
-
         let grid_variances = calculate_grid_triangle_area_variance(
             &lenses_uniform.data,
             &bounces_and_lengths_uniform.data,
-            &grids.get_grid(1 << 4).unwrap(),
+            &grids.get_grid(1 << MIN_GRID_LOG2_SIZE).unwrap(),
         );
 
         let MinMaxResult::MinMax(var_min, var_max) = grid_variances.iter().copied().minmax() else {
@@ -326,18 +368,6 @@ impl State {
                 .collect_vec()
         };
 
-        let grids_vertex_buffer = device.create_buffer_init(&BufferInitDescriptor {
-            label: Some("Grids Vertex Buffer"),
-            contents: bytemuck::cast_slice(grids.vertices()),
-            usage: BufferUsages::VERTEX,
-        });
-
-        let grids_index_buffer = device.create_buffer_init(&BufferInitDescriptor {
-            label: Some("Grids Index Buffer"),
-            contents: bytemuck::cast_slice(grids.indices()),
-            usage: BufferUsages::INDEX,
-        });
-
         // let mut img = image::Rgba32FImage::new(16, 16);
         // for (i, pixel) in img.pixels_mut().enumerate() {
         //     let limit = grid_limits_uniform.limits[28][i];
@@ -358,11 +388,12 @@ impl State {
         });
 
         let params = ParamsUniform {
+            debug_wireframe_alpha: 0.0,
+            debug_interpolate: 1.0,
             ray_dir,
             bid: 45,
             intensity: 0.5,
             lambda: 520.0, // 520 nm is some green color.
-            wireframe: 0,
         };
 
         let params_buffer = device.create_buffer_init(&BufferInitDescriptor {
@@ -966,7 +997,7 @@ impl State {
                             &default_bind_group_layouts,
                             None,
                         ) {
-                            anyhow::Result::Ok(pipeline) => {
+                            Ok(pipeline) => {
                                 shader.shader_last_error = None;
 
                                 self.render_pipelines.insert(PipelineId::Fill, pipeline);
@@ -990,7 +1021,7 @@ impl State {
                                 ..Default::default()
                             }),
                         ) {
-                            anyhow::Result::Ok(pipeline) => {
+                            Ok(pipeline) => {
                                 shader.shader_last_error = None;
 
                                 self.render_pipelines
@@ -1382,17 +1413,11 @@ impl State {
                 render_pass.set_bind_group(i as u32, &self.bind_groups[bind_group_id], &[]);
             }
 
-            let pipeline = if self.params_uniform.data.wireframe == 1 {
-                PipelineId::Wireframe
-            } else {
-                PipelineId::Fill
-            };
-
             render_pass.set_vertex_buffer(0, self.grids_vertex_buffer.slice(..));
             render_pass
                 .set_index_buffer(self.grids_index_buffer.slice(..), IndexFormat::Uint32);
 
-            if let Some(render_pipeline) = self.render_pipelines.get(&pipeline) {
+            if let Some(render_pipeline) = self.render_pipelines.get(&PipelineId::Fill) {
                 render_pass.set_pipeline(render_pipeline);
 
                 let selected_bid = self.params_uniform.data.bid;
@@ -1612,11 +1637,6 @@ impl State {
 
                     ui.separator();
                     ui.checkbox("Draw Axes", &mut self.draw_axes);
-                    ui.checkbox_flags(
-                        "Render Wireframe",
-                        &mut self.params_uniform.data.wireframe,
-                        1,
-                    );
 
                     ui.text(format!("Ray Pos: {:?}", self.params_uniform.data.ray_dir));
 
@@ -1627,6 +1647,9 @@ impl State {
                         "{}->{} ({})",
                         bounces_and_length.x, bounces_and_length.y, bounces_and_length.z
                     ));
+
+                    ui.slider("Wireframe Alpha", 0.0, 1.0, &mut self.params_uniform.data.debug_wireframe_alpha);
+                    ui.slider("Interpolate Grid", 0.0, 1.0, &mut self.params_uniform.data.debug_interpolate);
 
                     let max_bounces = (self.lenses_uniform.data.bounce_count - 1) as i32;
 

@@ -43,6 +43,12 @@ var<uniform> system: LensSystem;
 @group(1) @binding(1)
 var<storage, read> bounces_and_lengths: array<vec3u, NUM_BOUNCES>;
 
+@group(1) @binding(2)
+var<storage, read> vertices: array<vec3f>;
+
+@group(1) @binding(3)
+var<storage, read> indices: array<u32>;
+
 fn fresnel_anti_reflect(
     theta0: f32, // angle of incidence
     lambda: f32, // wavelength of ray
@@ -177,7 +183,8 @@ fn trace(
        // record texture coord. or max. rel. radius
        if f.flat_surface == 0 {
         r.tex.z = max(r.tex.z, length(i.pos.xy) / f.sa);
-       } else if t == system.aperture_index { // iris aperture plane
+       } else if t == system.aperture_index {
+        // iris aperture plane
         r.tex.x = i.pos.x / system.interfaces[system.aperture_index].sa;
         r.tex.y = i.pos.y / system.interfaces[system.aperture_index].sa;
        }
