@@ -1,4 +1,4 @@
-use glam::{Vec2, Vec3};
+use glam::Vec2;
 
 pub struct Arc {
     center: Vec2,
