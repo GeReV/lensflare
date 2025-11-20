@@ -35,21 +35,21 @@ pub struct Grids {
 
 impl Grids {
     pub fn new(log2_range: Range<usize>) -> Self {
+        let vertex_count = log2_range.clone().into_iter().map(|n| (n + 1).pow(2)).sum();
+
         let mut vertices =
-            Vec::with_capacity(log2_range.clone().into_iter().map(|n| (n + 1).pow(2)).sum());
+            Vec::with_capacity(vertex_count);
         let mut indices =
-            Vec::with_capacity(log2_range.clone().into_iter().map(|n| (n + 1).pow(2)).sum());
+            Vec::with_capacity(vertex_count * 6);
 
         let mut vertices_starts = Vec::with_capacity(log2_range.len());
         let mut indices_starts = Vec::with_capacity(vertices_starts.capacity());
 
         for i in log2_range.clone() {
-            let start_index = vertices.len() as u32;
-
-            vertices_starts.push(start_index);
+            vertices_starts.push(vertices.len() as u32);
             indices_starts.push(indices.len() as u32);
 
-            Self::build_grid(1 << i, &mut vertices, &mut indices, start_index);
+            Self::build_grid(1 << i, &mut vertices, &mut indices);
         }
 
         Self {
@@ -64,8 +64,7 @@ impl Grids {
     pub fn build_grid(
         cell_count: u32,
         vertices: &mut Vec<Vec3>,
-        indices: &mut Vec<u32>,
-        start_index: u32,
+        indices: &mut Vec<u32>
     ) {
         let vert_count = cell_count + 1;
 
@@ -82,12 +81,12 @@ impl Grids {
         for y in 0..cell_count {
             for x in 0..cell_count {
                 let tl = y * vert_count + x;
-                indices.push(start_index + tl);
-                indices.push(start_index + tl + 1);
-                indices.push(start_index + tl + vert_count + 0);
-                indices.push(start_index + tl + 1);
-                indices.push(start_index + tl + vert_count + 1);
-                indices.push(start_index + tl + vert_count + 0);
+                indices.push(tl);
+                indices.push(tl + 1);
+                indices.push(tl + vert_count + 0);
+                indices.push(tl + 1);
+                indices.push(tl + vert_count + 1);
+                indices.push(tl + vert_count + 0);
             }
         }
     }

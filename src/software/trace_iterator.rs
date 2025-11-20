@@ -82,11 +82,11 @@ impl<'a> Iterator for TraceIterator<'a> {
 
             // record texture coord. or max. rel. radius
             if f.flat_surface == 0 {
-                self.ray.tex.z = self.ray.tex.z.max(i.pos.xy().length() / f.sa);
+                self.ray.tex.z = self.ray.tex.z.max(i.pos.xy().length() / f.sa_half);
             } else if self.t == self.aperture_index {
                 // iris aperture plane
-                self.ray.tex.x = i.pos.x / self.lens_interfaces[self.aperture_index].sa;
-                self.ray.tex.y = i.pos.y / self.lens_interfaces[self.aperture_index].sa;
+                self.ray.tex.x = i.pos.x / self.lens_interfaces[self.aperture_index].sa_half;
+                self.ray.tex.y = i.pos.y / self.lens_interfaces[self.aperture_index].sa_half;
             }
 
             // update ray direction and position

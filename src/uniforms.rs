@@ -1,12 +1,11 @@
 use crate::camera::{Camera, Projection};
-use crate::lenses::LensInterface;
+use crate::lenses::{Lens, LensInterface};
 use crate::registry::{Id, Registry};
 use crate::software::build_ray_grid_limits;
 use anyhow::format_err;
-use cgmath::Zero;
 use encase::internal::WriteInto;
 use encase::{ArrayLength, ShaderType, UniformBuffer};
-use glam::{vec2, vec3, vec4, Mat4, UVec3, Vec3, Vec4};
+use glam::{vec3, vec4, Mat4, UVec3, Vec3, Vec4};
 use std::f32::consts::PI;
 
 const NUM_INTERFACES: usize = 32;
@@ -90,7 +89,7 @@ pub struct LensInterfaceUniform {
     pub center: Vec3,      // center of sphere / plane on z-axis
     pub n: Vec3,           // refractive indices (n0, n1, n2)
     pub radius: f32,       // radius of sphere/plane
-    pub sa: f32,           // nominal radius (from optical axis)
+    pub sa_half: f32,           // nominal radius (from optical axis)
     pub d1: f32,           // coating thickness = lambdaAR / 4 / n1
     pub flat_surface: u32, // is this interface a plane?
 }
@@ -101,7 +100,7 @@ impl LensInterfaceUniform {
             center: Vec3::ZERO,
             n: Vec3::ZERO,
             radius: 0.0,
-            sa: 0.0,
+            sa_half: 0.0,
             d1: 0.0,
             flat_surface: 0,
         }
@@ -117,75 +116,73 @@ pub struct LensSystemUniform {
     pub aperture_index: u32,
 }
 
-impl From<&Vec<LensInterface>> for LensSystemUniform {
-    fn from(lenses: &Vec<LensInterface>) -> Self {
+impl From<&[LensInterface]> for LensSystemUniform {
+    fn from(lenses: &[LensInterface]) -> Self {
         let mut result = Self {
             interfaces: [LensInterfaceUniform::new(); NUM_INTERFACES],
-            interface_count: 1 + lenses.len() as u32,
+            interface_count: lenses.len() as u32,
             bounce_count: {
-                let bounce_lens_count = lenses.len() - 1;
+                let bounce_lens_count = lenses.len() - 2;
                 (bounce_lens_count * (bounce_lens_count - 1) / 2) as u32
             },
             aperture_index: 0,
         };
 
-        let mut prev_refr_index = 1.0;
-        let mut offset = 0.0;
-        let mut prev_thickness = 0.0;
+        let mut total_lens_length: f32 = 0.0;
 
-        const SCALE_FACTOR: f32 = 1e-3;
+        for (i, lens) in lenses.iter().enumerate().rev() {
+            total_lens_length += lens.d;
 
-        result.interfaces[0] = LensInterfaceUniform {
-            center: Vec3::ZERO,
-            radius: lenses[0].radius * SCALE_FACTOR,
-            n: Vec3::ONE,
-            sa: lenses[0].aperture * SCALE_FACTOR,
-            d1: 0.0,
-            flat_surface: 1,
-        };
-
-        for (i, lens) in lenses.iter().enumerate() {
-            let n0 = prev_refr_index;
+            let n0 = if i == 0 { LensInterface::AIR_N } else { lenses[i - 1].n };
             let n2 = lens.n;
             let n1 = (n0 * n2).sqrt().max(1.38); // 1.38 = lowest achievable
 
-            let radius = lens.radius * SCALE_FACTOR;
+            let mut n0_idx: isize = -1;
+            let mut n2_idx: isize = -1;
 
-            offset += result.interfaces[i].radius;
-            offset -= radius;
-            offset -= prev_thickness;
+            //if medium is not AIR, we must detect lens property
+            if(n0 != 1.0 || n2 != 1.0)
+            {
+                let mut n0_idx_diff = f32::MAX;
+                let mut n2_idx_diff = f32::MAX;
 
-            result.interfaces[i + 1] = LensInterfaceUniform {
-                center: Vec3::new(0.0, 0.0, offset),
-                radius,
-                n: Vec3::new(n0, n1, n2),
-                sa: lens.aperture * SCALE_FACTOR,
-                d1: 0.0, // TODO: lambda0 / 4 / n1 ; // phase delay
-                flat_surface: 0,
-            };
 
-            if lens.radius.is_zero() {
-                // This is the aperture.
-                result.interfaces[i + 1].flat_surface = 1;
-                result.interfaces[i + 1].n = Vec3::ONE;
+                for (idx, lens) in Lens::LENS_TABLE.iter().enumerate() {
+                    if n0 != 1.0
+                    {
+                        let current_left_abbe_diff = (lens.nd - n0).abs();
+                        if n0_idx_diff > current_left_abbe_diff
+                        {
+                            n0_idx = idx as isize;
+                            n0_idx_diff = current_left_abbe_diff;
+                        }
+                    }
 
-                result.aperture_index = (i + 1) as u32;
+                    if n2 != 1.0
+                    {
+                        let current_right_abbe_diff = (lens.nd - n2).abs();
+                        if n2_idx_diff > current_right_abbe_diff
+                        {
+                            n2_idx = idx as isize;
+                            n2_idx_diff = current_right_abbe_diff;
+                        }
+                    }
+                }
             }
 
-            prev_refr_index = result.interfaces[i + 1].n.z;
-            prev_thickness = lens.axis_position * SCALE_FACTOR;
+            if lens.radius == 0.0 && i > 0 && i < result.interface_count as usize - 1 {
+                result.aperture_index = i as u32;
+            }
+
+            result.interfaces[i] = LensInterfaceUniform {
+                center: vec3(0.0, 0.0, total_lens_length - lens.radius),
+                radius: lens.radius,
+                n: vec3(n0_idx as f32, n1, n2_idx as f32),
+                sa_half: lens.sa_half,
+                d1: lens.coating_thickness,
+                flat_surface: if lens.flat { 1 } else { 0 },
+            };
         }
-
-        let last_lens = &result.interfaces[lenses.len()];
-
-        result.interfaces[1 + lenses.len()] = LensInterfaceUniform {
-            center: last_lens.center + vec3(0.0, 0.0, last_lens.radius - prev_thickness),
-            radius: 0.0,
-            n: Vec3::ONE,
-            sa: 0.0,
-            d1: 0.0,
-            flat_surface: 1,
-        };
 
         result
     }

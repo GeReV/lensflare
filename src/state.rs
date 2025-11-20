@@ -1,32 +1,47 @@
-use std::collections::HashMap;
-use std::f32::consts::PI;
-use std::path::Path;
-use std::time::{Duration, Instant};
-use wgpu::{Backends, BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayout, BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingResource, BindingType, BlendComponent, BlendFactor, BlendOperation, BlendState, Buffer, BufferAddress, BufferBindingType, BufferDescriptor, BufferUsages, Color, ColorTargetState, ColorWrites, CommandEncoderDescriptor, Device, DeviceDescriptor, Extent3d, Face, Features, FragmentState, FrontFace, IndexFormat, Instance, InstanceDescriptor, Label, Limits, LoadOp, MultisampleState, Operations, PipelineCompilationOptions, PipelineLayoutDescriptor, PolygonMode, PowerPreference, PresentMode, PrimitiveState, PrimitiveTopology, Queue, RenderPass, RenderPassColorAttachment, RenderPassDescriptor, RenderPipeline, RenderPipelineDescriptor, RequestAdapterOptions, SamplerBindingType, ShaderModule, ShaderStages, StoreOp, Surface, SurfaceConfiguration, Texture, TextureDimension, TextureFormat, TextureSampleType, TextureUsages, TextureViewDimension, Trace, VertexState};
-use imgui_winit_support::WinitPlatform;
-use imgui_wgpu::{Renderer, RendererConfig};
-use imgui::{Condition, FontSource, MouseCursor, TreeNodeFlags};
-use winit::window::Window;
-use naga_oil::compose::Composer;
-use glam::{vec3, vec4, Vec3, Vec3Swizzles, Vec4};
-use wgpu::wgt::{SamplerDescriptor, TextureDescriptor, TextureViewDescriptor};
-use anyhow::anyhow as format_err;
-use wgpu::util::{BufferInitDescriptor, DeviceExt};
-use encase::{StorageBuffer, UniformBuffer};
-use itertools::{Itertools, MinMaxResult};
-use winit::event_loop::ActiveEventLoop;
-use winit::keyboard::KeyCode;
-use winit::event::{MouseButton, MouseScrollDelta};
 use crate::arc::Arc;
 use crate::camera::{Camera, CameraController, Projection};
 use crate::grids::Grids;
 use crate::hot_reload::{HotReloadResult, HotReloadShader};
-use crate::lenses::parse_lenses;
+use crate::lenses::{Lens, LensInterface};
+// use crate::lenses::parse_lenses;
 use crate::registry::{Id, Registry};
-use crate::shaders::{create_shader, init_composer};
+use crate::shaders::create_shader;
 use crate::software::calculate_grid_triangle_area_variance;
-use crate::uniforms::{BouncesAndLengthsUniform, CameraUniform, GridLimitsUniform, LensSystemUniform, ParamsUniform, Uniform};
+use crate::uniforms::{
+    BouncesAndLengthsUniform, CameraUniform, GridLimitsUniform, LensSystemUniform, ParamsUniform,
+    Uniform,
+};
 use crate::vertex::{ColoredVertex, Vertex};
+use encase::{StorageBuffer, UniformBuffer};
+use glam::{vec3, vec4, Vec3, Vec3Swizzles, Vec4};
+use imgui::{Condition, FontSource, MouseCursor};
+use imgui_wgpu::{Renderer, RendererConfig};
+use imgui_winit_support::WinitPlatform;
+use itertools::{Itertools, MinMaxResult};
+use std::collections::HashMap;
+use std::f32::consts::PI;
+use std::time::{Duration, Instant};
+use wesl::{StandardResolver, Wesl};
+use wgpu::util::{BufferInitDescriptor, DeviceExt};
+use wgpu::wgt::{SamplerDescriptor, TextureDescriptor, TextureViewDescriptor};
+use wgpu::{
+    Backends, BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayout,
+    BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingResource, BindingType, BlendComponent,
+    BlendFactor, BlendOperation, BlendState, Buffer, BufferAddress, BufferBindingType,
+    BufferDescriptor, BufferUsages, Color, ColorTargetState, ColorWrites, CommandEncoderDescriptor,
+    Device, DeviceDescriptor, Extent3d, Face, Features, FragmentState, FrontFace, IndexFormat,
+    Instance, InstanceDescriptor, Label, Limits, LoadOp, MultisampleState, Operations,
+    PipelineCompilationOptions, PipelineLayoutDescriptor, PolygonMode, PowerPreference,
+    PresentMode, PrimitiveState, PrimitiveTopology, Queue, RenderPass, RenderPassColorAttachment,
+    RenderPassDescriptor, RenderPipeline, RenderPipelineDescriptor, RequestAdapterOptions,
+    SamplerBindingType, ShaderModule, ShaderStages, StoreOp, Surface, SurfaceConfiguration,
+    Texture, TextureDimension, TextureFormat, TextureSampleType, TextureUsages,
+    TextureViewDimension, Trace, VertexState,
+};
+use winit::event::{MouseButton, MouseScrollDelta};
+use winit::event_loop::ActiveEventLoop;
+use winit::keyboard::KeyCode;
+use winit::window::Window;
 
 // TODO: Render ghosts without alpha?
 
@@ -58,7 +73,7 @@ const ADDITIVE_BLEND: BlendState = BlendState {
     },
 };
 
-const MIN_GRID_LOG2_SIZE: usize = 5;
+const MIN_GRID_LOG2_SIZE: usize = 4;
 
 pub struct State {
     surface: Surface<'static>,
@@ -100,7 +115,7 @@ pub struct State {
     fullscreen_bind_group_layout_id: Id<BindGroupLayout>,
     fullscreen_bind_group_id: Id<BindGroup>,
 
-    pub(crate) light_angles: Vec4,
+    pub(crate) light_pos: Vec4,
 
     grids: Grids,
     bounces_grid_log2_sizes: Vec<u32>,
@@ -192,19 +207,16 @@ impl State {
             view_formats: &[],
         });
 
-        let lenses = parse_lenses(include_str!("../lenses/wide.22mm.dat"))
-            .map_err(|e| format_err!("Failed to parse lenses: {}", e))?;
+        let lenses = &LensInterface::NIKON_28_75MM;
 
-        let mut lenses_uniform = LensSystemUniform::from(&lenses);
-
-        lenses_uniform.interfaces[2].d1 = 96.4;
+        let lenses_uniform = LensSystemUniform::from(&lenses[..]);
 
         // Lens at interface_count - 1 is the sensor.
-        let last_lens = &lenses_uniform.interfaces[lenses_uniform.interface_count as usize];
+        let sensor = &lenses_uniform.interfaces[lenses_uniform.interface_count as usize - 1];
 
         let view_angle = cgmath::Deg(38.0);
 
-        let projection = Projection::new(config.width, config.height, view_angle, 0.01, 100.0);
+        let projection = Projection::new(config.width, config.height, view_angle, 0.1, 1000.0);
 
         let (camera, camera_controller, camera_uniform) = Self::create_camera(
             &device,
@@ -212,7 +224,7 @@ impl State {
             &mut buffers,
             &mut bind_group_layouts,
             &mut bind_groups,
-            -last_lens.center.z,
+            sensor.center.z,
         )?;
 
         let lenses_uniform_buffer = device.create_buffer_init(&BufferInitDescriptor {
@@ -226,14 +238,13 @@ impl State {
             lenses_uniform.aperture_index as usize,
         );
 
-        let bounces_and_lengths_buffer =
-            device.create_buffer_init(&BufferInitDescriptor {
-                label: Some("Bounces and Lengths Uniform Buffer"),
-                usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
-                contents: &StorageBuffer::<BouncesAndLengthsUniform>::content_of::<_, Vec<u8>>(
-                    &bounces_and_lengths_uniform,
-                )?,
-            });
+        let bounces_and_lengths_buffer = device.create_buffer_init(&BufferInitDescriptor {
+            label: Some("Bounces and Lengths Uniform Buffer"),
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+            contents: &StorageBuffer::<BouncesAndLengthsUniform>::content_of::<_, Vec<u8>>(
+                &bounces_and_lengths_uniform,
+            )?,
+        });
 
         // Generate grids for the following 2^N range of sizes.
         let grids = Grids::new(MIN_GRID_LOG2_SIZE..10);
@@ -471,12 +482,11 @@ impl State {
             }
         }
 
-        let static_lines_vertex_buffer =
-            device.create_buffer_init(&BufferInitDescriptor {
-                label: Some("Lines Vertex Buffer"),
-                usage: BufferUsages::VERTEX,
-                contents: bytemuck::cast_slice(&static_lines_vertices),
-            });
+        let static_lines_vertex_buffer = device.create_buffer_init(&BufferInitDescriptor {
+            label: Some("Lines Vertex Buffer"),
+            usage: BufferUsages::VERTEX,
+            contents: bytemuck::cast_slice(&static_lines_vertices),
+        });
 
         let ray_lines_vertex_buffer = device.create_buffer(&BufferDescriptor {
             label: Some("Lines Vertex Buffer"),
@@ -629,7 +639,7 @@ impl State {
             fullscreen_bind_group_layout_id,
             fullscreen_bind_group_id,
 
-            light_angles: vec4(0., -PI * 0.5, 0., 0.),
+            light_pos: vec4(-0.5, -0.2, 0.0, 0.0),
 
             grids,
             bounces_grid_log2_sizes,
@@ -670,7 +680,7 @@ impl State {
             cgmath::Deg(90.0),            // yaw
             cgmath::Deg(0.0),             // pitch
         );
-        let camera_controller = CameraController::new(0.05, 1.75);
+        let camera_controller = CameraController::new(1.0, 1.75);
 
         let camera_uniform = CameraUniform::from_camera_and_projection(&camera, &projection);
 
@@ -737,19 +747,19 @@ impl State {
                 let col = Vec4::new(1.0, 1.0, 0.0, 0.3);
 
                 line_vertices.push(ColoredVertex::new(
-                    lens_center + Vec3::Y * lens.sa * 0.5,
+                    lens_center + Vec3::Y * lens.sa_half,
                     col,
                 ));
                 line_vertices.push(ColoredVertex::new(
-                    lens_center + Vec3::Y * (lens.sa * 0.5 + 0.02),
+                    lens_center + Vec3::Y * (lens.sa_half + 0.02),
                     col,
                 ));
                 line_vertices.push(ColoredVertex::new(
-                    lens_center - Vec3::Y * lens.sa * 0.5,
+                    lens_center - Vec3::Y * lens.sa_half,
                     col,
                 ));
                 line_vertices.push(ColoredVertex::new(
-                    lens_center - Vec3::Y * (lens.sa * 0.5 + 0.02),
+                    lens_center - Vec3::Y * (lens.sa_half + 0.02),
                     col,
                 ));
 
@@ -763,11 +773,11 @@ impl State {
                 let col = Vec4::new(1.0, 0.0, 1.0, 0.3);
 
                 line_vertices.push(ColoredVertex::new(
-                    lens_center + Vec3::Y * lens.sa * 0.5,
+                    lens_center + Vec3::Y * lens.sa_half,
                     col,
                 ));
                 line_vertices.push(ColoredVertex::new(
-                    lens_center - Vec3::Y * lens.sa * 0.5,
+                    lens_center - Vec3::Y * lens.sa_half,
                     col,
                 ));
 
@@ -784,7 +794,7 @@ impl State {
                     ),
                 };
 
-                let angle = (lens.sa * 0.5).atan2(lens.radius);
+                let angle = lens.sa_half.atan2(lens.radius);
                 let arc_center = lens_center.zy();
 
                 let (start_angle, end_angle) = if lens.radius > 0.0 {
@@ -904,68 +914,67 @@ impl State {
             )
             .unwrap();
 
-            let render_pipeline_lines_layout =
-                device.create_pipeline_layout(&PipelineLayoutDescriptor {
-                    label: Some("Render Lines Pipeline Layout"),
-                    bind_group_layouts: &[default_bind_group_layouts[0]],
-                    push_constant_ranges: &[],
-                });
+        let render_pipeline_lines_layout =
+            device.create_pipeline_layout(&PipelineLayoutDescriptor {
+                label: Some("Render Lines Pipeline Layout"),
+                bind_group_layouts: &[default_bind_group_layouts[0]],
+                push_constant_ranges: &[],
+            });
 
-            let targets = [Some(ColorTargetState {
-                format: TextureFormat::Rgba16Float,
-                blend: Some(BlendState::REPLACE),
-                write_mask: ColorWrites::ALL,
-            })];
+        let targets = [Some(ColorTargetState {
+            format: TextureFormat::Rgba16Float,
+            blend: Some(BlendState::REPLACE),
+            write_mask: ColorWrites::ALL,
+        })];
 
-            let render_pipeline_lines_desc = RenderPipelineDescriptor {
-                label: Some("Render Lines Pipeline"),
-                layout: Some(&render_pipeline_lines_layout),
-                vertex: VertexState {
-                    module: &lines_shader,
-                    entry_point: Some("vs_main"),
-                    buffers: &[ColoredVertex::desc()],
-                    compilation_options: PipelineCompilationOptions::default(),
-                },
-                fragment: Some(FragmentState {
-                    module: &lines_shader,
-                    entry_point: Some("fs_main"),
-                    targets: &targets,
-                    compilation_options: PipelineCompilationOptions::default(),
-                }),
-                primitive: PrimitiveState {
-                    topology: PrimitiveTopology::LineList,
-                    strip_index_format: None,
-                    front_face: FrontFace::Cw,
-                    cull_mode: None, // Some(Face::Back),
-                    // Setting this to anything other than Fill requires Features::NON_FILL_POLYGON_MODE
-                    polygon_mode: PolygonMode::Line,
-                    // Requires Features::DEPTH_CLIP_CONTROL
-                    unclipped_depth: false,
-                    // Requires Features::CONSERVATIVE_RASTERIZATION
-                    conservative: false,
-                },
-                depth_stencil: None,
-                // Some(DepthStencilState {
-                //     format: texture::Texture::DEPTH_FORMAT,
-                //     depth_write_enabled: true,
-                //     depth_compare: CompareFunction::Less,
-                //     stencil: StencilState::default(),
-                //     bias: DepthBiasState::default(),
-                // }),
-                multisample: MultisampleState {
-                    count: 1,
-                    mask: !0,
-                    alpha_to_coverage_enabled: false,
-                },
-                multiview: None,
-                cache: None,
-            };
+        let render_pipeline_lines_desc = RenderPipelineDescriptor {
+            label: Some("Render Lines Pipeline"),
+            layout: Some(&render_pipeline_lines_layout),
+            vertex: VertexState {
+                module: &lines_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[ColoredVertex::desc()],
+                compilation_options: PipelineCompilationOptions::default(),
+            },
+            fragment: Some(FragmentState {
+                module: &lines_shader,
+                entry_point: Some("fs_main"),
+                targets: &targets,
+                compilation_options: PipelineCompilationOptions::default(),
+            }),
+            primitive: PrimitiveState {
+                topology: PrimitiveTopology::LineList,
+                strip_index_format: None,
+                front_face: FrontFace::Cw,
+                cull_mode: None, // Some(Face::Back),
+                // Setting this to anything other than Fill requires Features::NON_FILL_POLYGON_MODE
+                polygon_mode: PolygonMode::Line,
+                // Requires Features::DEPTH_CLIP_CONTROL
+                unclipped_depth: false,
+                // Requires Features::CONSERVATIVE_RASTERIZATION
+                conservative: false,
+            },
+            depth_stencil: None,
+            // Some(DepthStencilState {
+            //     format: texture::Texture::DEPTH_FORMAT,
+            //     depth_write_enabled: true,
+            //     depth_compare: CompareFunction::Less,
+            //     stencil: StencilState::default(),
+            //     bias: DepthBiasState::default(),
+            // }),
+            multisample: MultisampleState {
+                count: 1,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
+            multiview: None,
+            cache: None,
+        };
 
-            render_pipelines.insert(
-                PipelineId::Lines,
-                device.create_render_pipeline(&render_pipeline_lines_desc),
-            );
-        }
+        render_pipelines.insert(
+            PipelineId::Lines,
+            device.create_render_pipeline(&render_pipeline_lines_desc),
+        );
     }
 
     fn update_render_pipelines(&mut self) {
@@ -1106,12 +1115,11 @@ impl State {
     ) -> anyhow::Result<RenderPipeline> {
         let label = label.unwrap_or("Default Render Pipeline");
 
-        let render_pipeline_layout =
-            device.create_pipeline_layout(&PipelineLayoutDescriptor {
-                label: Some(&format!("{label} Layout")),
-                bind_group_layouts: &bind_group_layouts,
-                push_constant_ranges: &[],
-            });
+        let render_pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
+            label: Some(&format!("{label} Layout")),
+            bind_group_layouts: &bind_group_layouts,
+            push_constant_ranges: &[],
+        });
 
         let render_pipeline_default = RenderPipelineDescriptor {
             label: Some(label),
@@ -1215,12 +1223,12 @@ impl State {
 
     pub(crate) fn handle_key(&mut self, event_loop: &ActiveEventLoop, key: KeyCode, pressed: bool) {
         if !self.camera_controller.handle_key(key, pressed) {
-            let velocity = if pressed { 1.0 } else { 0.0 };
+            let velocity = if pressed { 0.01 } else { 0.0 };
             match (key, pressed) {
-                (KeyCode::Numpad4, _) => self.light_angles.w = velocity,
-                (KeyCode::Numpad6, _) => self.light_angles.w = -velocity,
-                (KeyCode::Numpad8, _) => self.light_angles.z = velocity,
-                (KeyCode::Numpad2, _) => self.light_angles.z = -velocity,
+                (KeyCode::Numpad4, _) => self.light_pos.w = velocity,
+                (KeyCode::Numpad6, _) => self.light_pos.w = -velocity,
+                (KeyCode::Numpad8, _) => self.light_pos.z = velocity,
+                (KeyCode::Numpad2, _) => self.light_pos.z = -velocity,
                 (KeyCode::Escape, true) => event_loop.exit(),
                 (KeyCode::Home, true) => self.camera.reset(),
                 _ => {}
@@ -1258,19 +1266,16 @@ impl State {
 
         self.imgui.context.io_mut().update_delta_time(dt);
 
-        self.light_angles.x += dt.as_secs_f32() * self.light_angles.z;
-        self.light_angles.y += dt.as_secs_f32() * self.light_angles.w;
+        self.light_pos.x += dt.as_secs_f32() * self.light_pos.z;
+        self.light_pos.y += dt.as_secs_f32() * self.light_pos.w;
 
-        let (sin_pitch, cos_pitch) = self.light_angles.x.sin_cos();
-        let (sin_yaw, cos_yaw) = self.light_angles.y.sin_cos();
-
-        let ray_pos = vec3(cos_pitch * cos_yaw, sin_pitch, cos_pitch * sin_yaw).normalize();
+        let ray_dir = vec3(self.light_pos.x, self.light_pos.y, 1000.0).normalize();
 
         self.lenses_uniform
             .write_buffer(&self.queue, &self.buffers)
             .unwrap();
 
-        self.params_uniform.data.ray_dir = -ray_pos;
+        self.params_uniform.data.ray_dir = -ray_dir;
 
         self.params_uniform
             .write_buffer(&self.queue, &self.buffers)
@@ -1327,16 +1332,19 @@ impl State {
         }
 
         {
-            self.ray_lines_vertices
-                .push(ColoredVertex::new(Vec3::ZERO, Vec3::ONE.extend(0.25)));
+            let last_lens = self.lenses_uniform.data.interfaces
+                [self.lenses_uniform.data.interface_count as usize - 1];
+
+            self.ray_lines_vertices.push(ColoredVertex::new(
+                Vec3::ZERO.with_z(last_lens.center.z),
+                Vec3::ONE.extend(0.25),
+            ));
             self.ray_lines_vertices.push(ColoredVertex::new(
                 self.params_uniform.data.ray_dir,
                 Vec3::ONE.extend(0.25),
             ));
 
-            let lens = &self.lenses_uniform.data.interfaces
-                [self.lenses_uniform.data.interface_count as usize - 1];
-            let arc_verts = Arc::circle(lens.center.xy(), lens.sa * 0.5)
+            let arc_verts = Arc::circle(last_lens.center.xy(), last_lens.sa_half)
                 .iter(32)
                 .collect::<Vec<_>>();
 
@@ -1345,11 +1353,11 @@ impl State {
                 .flat_map(|a| {
                     [
                         ColoredVertex::new(
-                            Vec3::new(a[0].x, a[0].y, lens.center.z),
+                            Vec3::new(a[0].x, a[0].y, last_lens.center.z),
                             Vec3::Z.extend(0.2),
                         ),
                         ColoredVertex::new(
-                            Vec3::new(a[1].x, a[1].y, lens.center.z),
+                            Vec3::new(a[1].x, a[1].y, last_lens.center.z),
                             Vec3::Z.extend(0.2),
                         ),
                     ]
@@ -1414,30 +1422,50 @@ impl State {
             }
 
             render_pass.set_vertex_buffer(0, self.grids_vertex_buffer.slice(..));
-            render_pass
-                .set_index_buffer(self.grids_index_buffer.slice(..), IndexFormat::Uint32);
+            render_pass.set_index_buffer(self.grids_index_buffer.slice(..), IndexFormat::Uint32);
+
+            let selected_bid = self.params_uniform.data.bid;
+            let bounce_range = if selected_bid < 0 {
+                0..self.lenses_uniform.data.bounce_count
+            } else {
+                selected_bid as u32..(selected_bid + 1) as u32
+            };
 
             if let Some(render_pipeline) = self.render_pipelines.get(&PipelineId::Fill) {
                 render_pass.set_pipeline(render_pipeline);
 
-                let selected_bid = self.params_uniform.data.bid;
-                let bounce_range = if selected_bid < 0 {
-                    0..self.lenses_uniform.data.bounce_count
-                } else {
-                    selected_bid as u32..(selected_bid + 1) as u32
-                };
-
-                for bid in bounce_range {
+                for bid in bounce_range.clone() {
                     let grid_size = self.bounces_grid_log2_sizes[bid as usize] as usize;
+                    let grid_size = 16;
 
-                    let (_, index_range) =
+                    let (vertex_range, index_range) =
                         self.grids.get_grid_size_index_ranges(grid_size).unwrap();
 
-                    render_pass.draw_indexed(index_range, 0, (bid * 3)..(bid + 1) * 3);
+                    render_pass.draw_indexed(
+                        index_range,
+                        vertex_range.start as i32,
+                        (bid * 3)..(bid + 1) * 3,
+                    );
                 }
-
-                self.params_uniform.data.bid = selected_bid;
             }
+
+            // if let Some(render_pipeline) = self.render_pipelines.get(&PipelineId::Wireframe) {
+            //     render_pass.set_pipeline(render_pipeline);
+            //
+            //     for bid in bounce_range.clone() {
+            //         let grid_size = self.bounces_grid_log2_sizes[bid as usize] as usize;
+            //         let grid_size = 32;
+            //
+            //         let (vertex_range, index_range) =
+            //             self.grids.get_grid_size_index_ranges(grid_size).unwrap();
+            //
+            //         render_pass.draw_indexed(
+            //             index_range,
+            //             vertex_range.start as i32,
+            //             (bid * 3)..(bid + 1) * 3,
+            //         );
+            //     }
+            // }
         }
 
         {
@@ -1648,8 +1676,18 @@ impl State {
                         bounces_and_length.x, bounces_and_length.y, bounces_and_length.z
                     ));
 
-                    ui.slider("Wireframe Alpha", 0.0, 1.0, &mut self.params_uniform.data.debug_wireframe_alpha);
-                    ui.slider("Interpolate Grid", 0.0, 1.0, &mut self.params_uniform.data.debug_interpolate);
+                    ui.slider(
+                        "Wireframe Alpha",
+                        0.0,
+                        1.0,
+                        &mut self.params_uniform.data.debug_wireframe_alpha,
+                    );
+                    ui.slider(
+                        "Interpolate Grid",
+                        0.0,
+                        1.0,
+                        &mut self.params_uniform.data.debug_interpolate,
+                    );
 
                     let max_bounces = (self.lenses_uniform.data.bounce_count - 1) as i32;
 
@@ -1681,19 +1719,19 @@ impl State {
                     ui.slider("Ray Step Count", 0, 100, &mut self.ray_step_count);
 
                     // List of slider for the anti-reflection coating on each interface.
-                    if ui.collapsing_header("Anti-reflection Coatings", TreeNodeFlags::DEFAULT_OPEN)
-                    {
-                        for i in 1..self.lenses_uniform.data.interface_count {
-                            let interface = &mut self.lenses_uniform.data.interfaces[i as usize];
-
-                            ui.slider(
-                                format!("Interface {i}"),
-                                0.0,
-                                830.0 * 0.25,
-                                &mut interface.d1,
-                            );
-                        }
-                    }
+                    // if ui.collapsing_header("Anti-reflection Coatings", TreeNodeFlags::DEFAULT_OPEN)
+                    // {
+                    //     for i in 1..self.lenses_uniform.data.interface_count {
+                    //         let interface = &mut self.lenses_uniform.data.interfaces[i as usize];
+                    //
+                    //         ui.slider(
+                    //             format!("Interface {i}"),
+                    //             0.0,
+                    //             830.0 * 0.25,
+                    //             &mut interface.d1,
+                    //         );
+                    //     }
+                    // }
                 });
 
             // ui.show_demo_window(&mut imgui.demo_open);

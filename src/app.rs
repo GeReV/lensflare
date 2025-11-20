@@ -7,7 +7,7 @@ use winit::dpi::LogicalSize;
 use winit::event::{DeviceEvent, DeviceId, ElementState, Event, KeyEvent, WindowEvent};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use wgpu::SurfaceError;
-use glam::Vec2;
+use glam::{vec4, Vec2};
 use crate::state::State;
 
 pub struct App {
@@ -147,15 +147,9 @@ impl ApplicationHandler<State> for App {
                     }
 
                     if state.mouse_right_pressed {
-                        let delta = Vec2::new(-delta.1 as f32, delta.0 as f32) * 0.001;
+                        let delta = Vec2::new(delta.0 as f32, -delta.1 as f32) * 0.1;
 
-                        let mut l = state.light_angles;
-
-                        l.x += delta.x;
-                        l.y += delta.y;
-                        l.x = l.x.clamp(-PI * 0.25, PI * 0.25);
-
-                        state.light_angles = l;
+                        state.light_pos += delta.extend(0.0).extend(0.0);
                     }
                 }
             }

@@ -169,11 +169,11 @@ pub fn trace(
 
         // record texture coord. or max. rel. radius
         if f.flat_surface == 0 {
-            ray.tex.z = ray.tex.z.max(i.pos.xy().length() / f.sa);
+            ray.tex.z = ray.tex.z.max(i.pos.xy().length() / f.sa_half);
         } else if t == aperture_index {
             // iris aperture plane
-            ray.tex.x = i.pos.x / interfaces[aperture_index].sa;
-            ray.tex.y = i.pos.y / interfaces[aperture_index].sa;
+            ray.tex.x = i.pos.x / interfaces[aperture_index].sa_half;
+            ray.tex.y = i.pos.y / interfaces[aperture_index].sa_half;
         }
 
         // update ray direction and position
@@ -299,7 +299,7 @@ pub fn build_ray_grid_limits(
     let limits = offsets
         .into_iter()
         .map(|offset| {
-            let outer = lens_center + offset.extend(0.0) * 0.5 * entrance.sa;
+            let outer = lens_center + offset.extend(0.0) * entrance.sa_half;
 
             search_ray_grid_limits(
                 &lenses_uniform,
@@ -335,7 +335,7 @@ pub fn calculate_grid_triangle_area_variance(
             .map(|&v| {
                 let mut ray_pos = v;
                 ray_pos -= 0.5;
-                ray_pos *= 0.5 * entrance.sa;
+                ray_pos *= entrance.sa_half;
 
                 let ray_pos = ray_pos.with_z(entrance_center.z);
 
