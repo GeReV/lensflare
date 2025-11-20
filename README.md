@@ -59,3 +59,25 @@ direction I'm taking, without actually diving into the weeds and seeing any spoi
 From a quick glance at the structure of [this GitHub repository](https://github.com/Peiteng/Physically-Based-Realtime-Lens-Flare),
 it looks like their implementation is quite far off from mine. I am considering taking a deeper look at their code to at
 least understand how the ghost rendering pass is supposed to work.
+
+### 2025-11-18
+
+Adding controls to view the grid's wireframe with the shading and to unwarp it, it seems that using math and 
+signed-distance fields to create the ghosts causes artifacts due to the grid UVs being warped.
+
+### 2025-11-20
+
+Decided to try adapting the lens models and a bit of code from the aforementioned repository.
+
+Using their lens data, the grids end up looking correct, without the warping artifacts I was seeing before. 
+I'm not sure if this is solely due to the fact that the lenses aren't scaled now, 
+or if the model is just very different.
+
+Having values for the anti-reflection coating also makes things look better.
+
+Some color was lost when I adopted the code that is responsible for providing chromatic aberration and 
+wavelength-dependent refraction, but I guess that's not really an issue.
+
+It's awfully tempting to keep using the reference code, but I'll try to keep that to a minimum.
+
+![](screenshots/wip05.png)
