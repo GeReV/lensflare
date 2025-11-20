@@ -24,7 +24,7 @@ struct LensInterface {
     n: vec3f, // refractive indices (n0, n1, n2)
     radius: f32, // radius of sphere/plane
     sa: f32, // nominal radius (from optical axis)
-    d: f32, // coating thickness = lambdaAR / 4 / n1
+    d0: f32, // coating thickness = lambdaAR / 4 / n1
     flat_surface: u32, // is this interface a plane?
 }
 
@@ -90,24 +90,29 @@ fn compute_ref_index(lambda_in_micrometer: f32, lens: Lens) -> f32 {
 fn fresnel_anti_reflect(
     theta0: f32, // angle of incidence
     lambda: f32, // wavelength of ray
-    d: f32, // thickness of anti-reflection coating
+    d1: f32, // thickness of anti-reflection coating
     n0: f32, // RI (refr. index) of 1st medium
     n1: f32, // RI of coating layer
     n2: f32, // RI of the 2nd medium
 ) -> f32 {
     // refraction angle sin coating and the 2nd medium
-    let theta1 = asin(sin(theta0) * n0 / n1);
-    let theta2 = asin(sin(theta0) * n0 / n2);
+    let sin_theta0 = sin(theta0);
+    let theta1 = asin(sin_theta0 * n0 / n1);
+    let theta2 = asin(sin_theta0 * n0 / n2);
 
     // amplitude for outer refl./transmission on topmost interface
-    let rs01 = -sin(theta0 - theta1) / sin(theta0 + theta1);
-    let rp01 = tan(theta0 - theta1) / tan(theta0 + theta1);
-    let ts01 = 2.0 * sin(theta1) * cos(theta0) / sin(theta0 + theta1);
-    let tp01 = ts01 * cos(theta0 - theta1);
+    let theta0plus1 = theta0 + theta1;
+    let theta0minus1 = theta0 - theta1;
+    let rs01 = -sin(theta0minus1) / sin(theta0plus1);
+    let rp01 = tan(theta0minus1) / tan(theta0plus1);
+    let ts01 = 2.0 * sin(theta1) * cos(theta0) / sin(theta0plus1);
+    let tp01 = ts01 * cos(theta0minus1);
 
     // amplitude for inner reflection
-    let rs12 = -sin ( theta1-theta2 ) / sin ( theta1+theta2 ) ;
-    let rp12 = tan ( theta1-theta2 ) / tan ( theta1+theta2 ) ;
+    let theta1plus2 = theta1 + theta2;
+    let theta1minus2 = theta1 - theta2;
+    let rs12 = -sin ( theta1minus2 ) / sin ( theta1plus2 ) ;
+    let rp12 = tan ( theta1minus2 ) / tan ( theta1plus2 ) ;
 
     // after passing through first surface twice:
     // 2 transmissions and 1 reflection
@@ -115,16 +120,17 @@ fn fresnel_anti_reflect(
     let rip = tp01*tp01*rp12 ;
 
     // phase difference between outer and inner reflections
-    let dy = d*n1 ;
-    let dx = tan ( theta1 ) *dy ;
+    let dy = d1 * n1 ;
+    let dx = tan ( theta1 ) * dy;
     let delay = sqrt ( dx*dx+dy*dy ) ;
-    let rel_phase = 4 * PI / lambda * (delay - dx*sin(theta0));
+    let col_rel_phase = cos(4 * PI / lambda * (delay - dx*sin_theta0));
 
     // Add up sines of different phase and amplitude
-    let out_s2 = rs01*rs01 + ris*ris + 2*rs01*ris*cos ( rel_phase ) ;
-    let out_p2 = rp01*rp01 + rip*rip + 2*rp01*rip*cos ( rel_phase ) ;
+    let out_s2 = rs01*rs01 + ris*ris + 2*rs01*ris * col_rel_phase;
+    let out_p2 = rp01*rp01 + rip*rip + 2*rp01*rip * col_rel_phase;
 
-    return ( out_s2+out_p2 ) / 2 ; // reflectivity
+    // reflectivity
+    return ( out_s2 + out_p2 ) * 0.5;
 }
 
 fn test_flat(r: Ray, f: LensInterface) -> Intersection {
@@ -236,8 +242,9 @@ fn trace(
         r.tex.z = max(r.tex.z, length(i.pos.xy) / f.sa);
        } else if t == system.aperture_index {
         // iris aperture plane
-        r.tex.x = i.pos.x / system.interfaces[system.aperture_index].sa;
-        r.tex.y = i.pos.y / system.interfaces[system.aperture_index].sa;
+        let v = i.pos.xy / system.interfaces[system.aperture_index].sa;
+        r.tex.x = v.x;
+        r.tex.y = v.y;
        }
 
        // update ray direction and position
@@ -258,7 +265,7 @@ fn trace(
        var n0_idx: u32;
        var n2_idx: u32;
 
-       var n1 = f.n.y;
+       let n1 = f.n.y;
 
         if r.dir.z < 0 {
             n0_idx = u32(f.n.x);
@@ -306,11 +313,16 @@ fn trace(
                 break;
             }
        }
-       else // reflection with anti-reflection coating
+       else
        {
+           // reflection with anti-reflection coating
            r.dir = reflect ( r.dir , i.norm ) ;
-           let R = fresnel_anti_reflect(i.theta, lambda, f.d, n0, n1, n2) ;
-           r.tex.a *= R ; // update ray intensity
+           var R = fresnel_anti_reflect(i.theta, lambda, f.d0, n0, n1, n2);
+
+            // TODO: Not sure why NaNs occur here.
+           R = max(0, R);
+
+           r.tex.a *= R; // update ray intensity
        }
 
        t += delta;
@@ -318,12 +330,10 @@ fn trace(
 
    if k<length {
     // early-exit rays = invalid
-        cull_ray(&r);
-//        r.tex.a = f32(length - k);
+    cull_ray(&r);
    } else {
         r.pos.z = 1;
    }
-//    r.tex.a = f32(k) / f32(length);
 
    return r;
 }

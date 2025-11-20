@@ -442,7 +442,7 @@ pub struct LensInterface {
     pub coating_thickness: f32, //coating thicknes = lambda / 4 / n1 [nm]
     pub n: f32,
     pub sa_half: f32,
-    pub d: f32,
+    pub d0: f32,
     pub flat: bool,
     pub abbe_number: f32,
 }
@@ -545,7 +545,7 @@ impl LensInterface {
         coating_thickness: f32,
         n: f32,
         sa_half: f32,
-        d: f32,
+        d0: f32,
         flat: bool,
         abbe_number: f32,
     ) -> Self {
@@ -554,7 +554,7 @@ impl LensInterface {
             coating_thickness,
             n,
             sa_half,
-            d,
+            d0,
             flat,
             abbe_number,
         }

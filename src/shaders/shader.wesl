@@ -45,8 +45,9 @@ struct VertexInput {
 struct VertexOutput {
     @builtin(position) clip_position: vec4f,
     @location(0) position: vec3f,
-    @location(1) color: vec4f,
+    @location(1) color: vec3f,
     @location(2) tex: vec4f,
+    @location(3) scale: f32,
 //    @location(3) barycentric_coord: vec3f,
 //    @location(1) tex_coords: vec2<f32>,
 }
@@ -131,20 +132,6 @@ fn vs_main(
 
     var col = wavelength_to_rgb(wavelength);
 
-//    col = vec3f();
-//    switch (lambda) {
-//        case 0: {
-//          col.x = 1;
-//        }
-//        case 1: {
-//          col.y = 1;
-//        }
-//        case 2: {
-//          col.z = 1;
-//        }
-//        default: { }
-//    }
-
     out.position = in.position;
     out.tex = out_ray.tex;
 
@@ -165,7 +152,9 @@ fn vs_main(
 //        col = vec3f();
 //    }
 
-    out.color = vec4f(col, 1);
+    out.color = col;
+
+//    out.scale = calculate_grid_scale(in.vertex_index);
 
 //    if out_pos.x < -1 || out_pos.x > 1 || out_pos.y < -1 || out_pos.y > 1 {
 //        out.tex.a = 0;
@@ -202,14 +191,11 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {
     let aperture = smoothstep(f_stop - 0.07, f_stop - 0.08, l);
 
     var alpha = in.tex.a;
-//    if min(alpha, 1000) == 1000 {
-//        alpha = 0;
-//    }
 
     let ray_dir = normalize(params.ray_dir);
 
     var color: vec4f;
-    color = vec4f(in.color.xyz, 1) * max(alpha, 0.001) * aperture;
+    color = vec4f(in.color.xyz, 1) * alpha * aperture;
 
 //    color = vec4f(reinhard(color);
 

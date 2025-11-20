@@ -131,7 +131,7 @@ impl From<&[LensInterface]> for LensSystemUniform {
         let mut total_lens_length: f32 = 0.0;
 
         for (i, lens) in lenses.iter().enumerate().rev() {
-            total_lens_length += lens.d;
+            total_lens_length += lens.d0;
 
             let n0 = if i == 0 { LensInterface::AIR_N } else { lenses[i - 1].n };
             let n2 = lens.n;
