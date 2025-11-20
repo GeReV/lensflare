@@ -67,7 +67,8 @@ signed-distance fields to create the ghosts causes artifacts due to the grid UVs
 
 ### 2025-11-20
 
-Decided to try adapting the lens models and a bit of code from the aforementioned repository.
+Guess I have to admit to some failure. I decided to try adapting the lens models and a bit of code 
+from the aforementioned repository.
 
 Using their lens data, the grids end up looking correct, without the warping artifacts I was seeing before. 
 I'm not sure if this is solely due to the fact that the lenses aren't scaled now, 
