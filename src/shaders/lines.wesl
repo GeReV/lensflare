@@ -1,4 +1,4 @@
-#import camera::{camera}
+import super::camera::camera;
 
 struct VertexInput {
     @builtin(vertex_index) vertex_index: u32,

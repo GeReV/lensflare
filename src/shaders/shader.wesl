@@ -1,7 +1,7 @@
-#import utils::{PI}
-#import camera::{camera}
-#import lenses::{system, vertices, indices, trace, Ray}
-#import colors::{wavelength_to_rgb}
+import super::utils::PI;
+import super::camera::camera;
+import super::lenses::{Ray, trace, system};
+import super::colors::wavelength_to_rgb;
 
 struct Params {
     debug_wireframe_alpha: f32,
@@ -47,7 +47,7 @@ struct VertexOutput {
     @location(0) position: vec3f,
     @location(1) color: vec4f,
     @location(2) tex: vec4f,
-    @location(3) barycentric_coord: vec3f,
+//    @location(3) barycentric_coord: vec3f,
 //    @location(1) tex_coords: vec2<f32>,
 }
 
@@ -68,6 +68,25 @@ fn edge_factor(bary: vec3f, thickness: f32) -> f32 {
   return min(min(a3.x, a3.y), a3.z);
 }
 
+fn calculate_grid_start_index(vertex_index: u32) -> u32 {
+    var i: u32 = 0;
+    var prev_start_index: u32 = 0;
+
+    for (; i < 32; i += 1) {
+        let grid_size = u32(1 << i) + 1;
+
+        let start_index = grid_size * grid_size;
+
+        if start_index >= vertex_index {
+            break;
+        }
+
+        prev_start_index = start_index;
+    }
+
+    return prev_start_index;
+}
+
 @vertex
 fn vs_main(
     in: VertexInput,
@@ -85,7 +104,6 @@ fn vs_main(
 
     let grid_limit = grid_limits[bid];
 
-    let sa = system.interfaces[0].sa;
 
     let normalized_pos = in.position.xy * 2 - 1;
 
@@ -93,7 +111,8 @@ fn vs_main(
     in_pos = normalized_pos;
     //in_pos = mix(grid_limit.xy, grid_limit.zw, in_pos);
 
-    in_pos = in_pos * sa * 0.5;
+    let sa = system.interfaces[0].sa;
+//    in_pos *= sa;
 
     // Set lens entrance center to the center of the lens with an offset relative to the ray's position and the lens' radius,
     // i.e., radius * 0.5 away from center of the lens.
@@ -101,7 +120,7 @@ fn vs_main(
 
 //    let light_pos = pos * system.interfaces[0].sa;
 //    let ray_dir = vec3f(0, 0, 1);
-    let ray_tex = vec4f(0, 0, 0, params.intensity);
+    let ray_tex = vec4f(0, 0, 0, 1);
 
     let wavelengths = array<f32, 3>(645, 520, 408);
 
@@ -129,15 +148,16 @@ fn vs_main(
     out.position = in.position;
     out.tex = out_ray.tex;
 
-    var pos = mix(in_ray.pos, out_ray.pos, params.debug_interpolate);
-//    pos = ;
-//    if out.tex.z > 1 {
-//        pos = in_pos;
-//    }
-
     let last_lens = system.interfaces[system.interface_count - 1];
 
-    out.clip_position = camera.view_proj * vec4f(pos.xy, last_lens.center.z, 1);
+    var out_pos = out_ray.pos;
+    if out_pos.z == 1 {
+        out_pos.z = last_lens.center.z;
+    }
+
+    var pos = mix(in_ray.pos, out_pos, params.debug_interpolate);
+
+    out.clip_position = camera.view_proj * vec4f(pos.xyz, 1);
 //    out.clip_position = camera.view_proj * vec4f(pos, 1.0);
 
 //    col = vec3f(in.position.xy, 0);
@@ -146,6 +166,10 @@ fn vs_main(
 //    }
 
     out.color = vec4f(col, 1);
+
+//    if out_pos.x < -1 || out_pos.x > 1 || out_pos.y < -1 || out_pos.y > 1 {
+//        out.tex.a = 0;
+//    }
 
 //    out.color = vec4f(f32(bounces_and_lengths[params.bid].x) / 11.0, f32(bounces_and_lengths[params.bid].y) / 11.0, 0.0, 1.0);
 //    out.color = vec4f(hsv2rgb(vec3f(f32(bid) / 38.0, 0.5, 0.5)), 0.1);
@@ -156,63 +180,40 @@ fn vs_main(
 
 //    out.color = vec3f(1.0);
 
-    let vert_index = in.vertex_index % 3;
-    let index = indices[in.vertex_index];
-
-    // note:
-    //
-    // * if your indices are U16 you could use this
-    //
-    //    let twoIndices = indices[vNdx / 2];  // indices is u32 but we want u16
-    //    let index = (twoIndices >> ((vNdx & 1) * 16)) & 0xFFFF;
-    //
-    // * if you're not using indices you could use this
-    //
-    //    let index = vNdx;
-
-//    let position = vec4f(vertices[index], vertices[index + 1], vertices[index + 2], 1);
-
-    // emit a barycentric coordinate
-    out.barycentric_coord = vec3f(0);
-    out.barycentric_coord[vert_index] = 1.0;
-
     return out;
 }
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4f {
-    if in.tex.z > 1 {
+    if in.tex.z > 1 || in.tex.a == 0 {
         discard;
     }
 
-    let focus = 22.0;
-    let aperture_diameter = 8.756;
+    let focus = 25.0;
+    let aperture_diameter = 14.0;
     let f = aperture_diameter / focus;
 
     let f_stop = f / pow(sqrt(2), 5);
 
     let normalized_pos = in.position.xy * 2 - 1;
 
-//    let b = smoothstep(f_stop, f_stop - 0.01, sd_hexagon(in.tex.xy, f_stop));
-    let l = length(in.tex.xy);
-    let aperture = smoothstep(f_stop, f_stop - 0.01, l);
+    let l = sd_hexagon(in.position.xy - 0.5, f_stop * 0.5);
+//    let l = length(in.position.xy - 0.5);
+    let aperture = smoothstep(f_stop - 0.07, f_stop - 0.08, l);
 
     var alpha = in.tex.a;
-    if min(alpha, 1000) == 1000 {
-        alpha = 0;
-    }
+//    if min(alpha, 1000) == 1000 {
+//        alpha = 0;
+//    }
 
     let ray_dir = normalize(params.ray_dir);
 
     var color: vec4f;
-    color = vec4f(in.color.xyz, 1) * alpha * aperture;
-//    color = vec4f(aperture, 0, 0, 1);
+    color = vec4f(in.color.xyz, 1) * max(alpha, 0.001) * aperture;
 
-    let edge = 1.0 - edge_factor(in.barycentric_coord, 1);
-    color = mix(color, vec4f(1), edge * params.debug_wireframe_alpha);
 //    color = vec4f(reinhard(color);
 
-//    color = vec4f(in.tex.xy * aperture, 0, alpha * aperture);
+//    color = vec4f(in.tex.xy, 0, 1);
 
 //    if in.tex.z > 1 {
 //        color = vec4f(1);

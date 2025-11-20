@@ -1,5 +1,3 @@
-#import colors
-
 @group(0) @binding(0) var tex_sampler : sampler;
 @group(0) @binding(1) var texture : texture_2d<f32>;
 

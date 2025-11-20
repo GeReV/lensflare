@@ -1,9 +1,23 @@
-#define_import_path lenses
-
-#import utils::{PI}
+import package::utils::PI;
 
 const NUM_INTERFACES: u32 = 32;
 const NUM_BOUNCES: u32 = NUM_INTERFACES * (NUM_INTERFACES - 1) / 2;
+
+struct Lens
+{
+    a0: f32,
+    a1: f32,
+    a2: f32,
+    a3: f32,
+    a4: f32,
+    a5: f32,
+    a6: f32,
+    a7: f32,
+    a8: f32,
+    nc: f32,
+    nd: f32,
+    nf: f32,
+}
 
 struct LensInterface {
     center: vec3f, // center of sphere / plane on z-axis
@@ -36,18 +50,42 @@ struct LensSystem {
 }
 
 @group(1) @binding(0)
+var<storage, read> lenses: array<Lens>;
+
+@group(1) @binding(1)
 var<uniform> system: LensSystem;
 
 // First two elements are the bounces, element 3 is length.
 // Merged to handle 16-byte memory alignment.
-@group(1) @binding(1)
+@group(1) @binding(2)
 var<storage, read> bounces_and_lengths: array<vec3u, NUM_BOUNCES>;
 
-@group(1) @binding(2)
+@group(1) @binding(3)
 var<storage, read> vertices: array<vec3f>;
 
-@group(1) @binding(3)
+@group(1) @binding(4)
 var<storage, read> indices: array<u32>;
+
+fn compute_ref_index(lambda_in_micrometer: f32, lens: Lens) -> f32 {
+        let lambda_pow2 = lambda_in_micrometer * lambda_in_micrometer;
+        let lambda_pow4 = lambda_pow2 * lambda_pow2;
+        let inv_lambda_pow2 = 1 / lambda_pow2;
+        let inv_lambda_pow4 = inv_lambda_pow2 * inv_lambda_pow2;
+        let inv_lambda_pow6 = inv_lambda_pow4 * inv_lambda_pow2;
+        let inv_lambda_pow8 = inv_lambda_pow6 * inv_lambda_pow2;
+        let inv_lambda_pow10 = inv_lambda_pow8 * inv_lambda_pow2;
+        let inv_lambda_pow12 = inv_lambda_pow10 * inv_lambda_pow2;
+        
+        return sqrt(lens.a0
+		+ lens.a1 * lambda_pow2
+		+ lens.a2 * lambda_pow4
+		+ lens.a3 * inv_lambda_pow2
+		+ lens.a4 * inv_lambda_pow4
+		+ lens.a5 * inv_lambda_pow6
+		+ lens.a6 * inv_lambda_pow8
+		+ lens.a7 * inv_lambda_pow10
+		+ lens.a8 * inv_lambda_pow12);
+    }
 
 fn fresnel_anti_reflect(
     theta0: f32, // angle of incidence
@@ -106,6 +144,8 @@ fn test_flat(r: Ray, f: LensInterface) -> Intersection {
 }
 
 fn test_sphere(r: Ray, f: LensInterface) -> Intersection {
+    const EPSILON: f32 = PI * 0.0001;
+
     var i: Intersection;
 
     let d = r.pos - f.center;
@@ -131,14 +171,24 @@ fn test_sphere(r: Ray, f: LensInterface) -> Intersection {
     i.norm = normalize( i.pos - f.center);
 
     if dot(i.norm, r.dir) > 0 {
-        i.norm = -i.norm;
+        i.norm *= -1;
     }
 
     i.theta = acos ( dot(-r.dir , i.norm ) ) ;
+    //avoid getting hole on grid
+    if (abs(i.theta) < EPSILON)
+    {
+        i.theta += EPSILON;
+    }
     i.hit = true;
-    i.inverted = t < 0 ; // mark an inverted ray
+    i.inverted = t < 0; // mark an inverted ray
 
     return i;
+}
+
+fn cull_ray(ray: ptr<function, Ray>) {
+    ray.pos = vec3f(0, 0, -1);
+    ray.tex.a = 0;
 }
 
 fn trace(
@@ -177,6 +227,7 @@ fn trace(
        if !i.hit {
            // exit upon miss
 //           r.tex.a = 2.0;
+            cull_ray(&r);
            break;
        }
 
@@ -204,16 +255,32 @@ fn trace(
         continue;
        }
        // do reflection/refraction for spher. surfaces
-       var n0: f32;
+       var n0_idx: u32;
+       var n2_idx: u32;
+
        var n1 = f.n.y;
-       var n2: f32;
 
         if r.dir.z < 0 {
-            n0 = f.n.x;
-            n2 = f.n.z;
+            n0_idx = u32(f.n.x);
+            n2_idx = u32(f.n.z);
         } else {
-            n0 = f.n.z;
-            n2 = f.n.x;
+            n0_idx = u32(f.n.z);
+            n2_idx = u32(f.n.x);
+        }
+
+        var n0: f32;
+        var n2: f32;
+
+        if n0_idx >= 0 {
+            n0 = compute_ref_index(lambda * 1e-3, lenses[n0_idx]);
+        } else {
+            n0 = 1;
+        }
+
+        if n2_idx >= 0 {
+            n2 = compute_ref_index(lambda * 1e-3, lenses[n2_idx]);
+        } else {
+            n2 = 1;
         }
 
 //        let lambda_offset = (1 - ((lambda - 380) / (800 - 380))) * 0.005;
@@ -228,11 +295,15 @@ fn trace(
 
        if !bReflect // refraction
        {
+           const EPSILON = 0.0001;
+
            r.dir = refract ( r.dir , i.norm , n0 / n2 ) ;
-           if all(r.dir == vec3f(0)) {
+
+           if length(r.dir) < EPSILON {
             // total reflection
 //            r.tex.a = 3.0;
-           break ;
+                cull_ray(&r);
+                break;
             }
        }
        else // reflection with anti-reflection coating
@@ -247,8 +318,10 @@ fn trace(
 
    if k<length {
     // early-exit rays = invalid
-        r.tex.a = 0;
+        cull_ray(&r);
 //        r.tex.a = f32(length - k);
+   } else {
+        r.pos.z = 1;
    }
 //    r.tex.a = f32(k) / f32(length);
 

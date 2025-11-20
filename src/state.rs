@@ -90,7 +90,7 @@ pub struct State {
     projection: Projection,
     pub(crate) camera_controller: CameraController,
 
-    composer: Composer,
+    compiler: Wesl<StandardResolver>,
     hot_reload_shaders: Vec<HotReloadShader>,
 
     // inputs_bind_group: BindGroup<InputsUniform>,
@@ -228,6 +228,12 @@ impl State {
         )?;
 
         let lenses_uniform_buffer = device.create_buffer_init(&BufferInitDescriptor {
+            label: Some("Lenses Uniform Buffer"),
+            usage: BufferUsages::STORAGE,
+            contents: &StorageBuffer::<&[Lens]>::content_of::<_, Vec<u8>>(&Lens::LENS_TABLE)?,
+        });
+
+        let lens_system_uniform_buffer = device.create_buffer_init(&BufferInitDescriptor {
             label: Some("Lens System Uniform Buffer"),
             usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
             contents: &UniformBuffer::<CameraUniform>::content_of::<_, Vec<u8>>(&lenses_uniform)?,
@@ -271,7 +277,7 @@ impl State {
                         binding: 0,
                         visibility: ShaderStages::VERTEX_FRAGMENT,
                         ty: BindingType::Buffer {
-                            ty: BufferBindingType::Uniform,
+                            ty: BufferBindingType::Storage { read_only: true },
                             has_dynamic_offset: false,
                             min_binding_size: None,
                         },
@@ -281,7 +287,7 @@ impl State {
                         binding: 1,
                         visibility: ShaderStages::VERTEX_FRAGMENT,
                         ty: BindingType::Buffer {
-                            ty: BufferBindingType::Storage { read_only: true },
+                            ty: BufferBindingType::Uniform,
                             has_dynamic_offset: false,
                             min_binding_size: None,
                         },
@@ -307,6 +313,16 @@ impl State {
                         },
                         count: None,
                     },
+                    BindGroupLayoutEntry {
+                        binding: 4,
+                        visibility: ShaderStages::VERTEX_FRAGMENT,
+                        ty: BindingType::Buffer {
+                            ty: BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
                 ],
             });
 
@@ -314,23 +330,19 @@ impl State {
             label: Some("Lenses Bind Group"),
             layout: &lenses_bind_group_layout,
             entries: &[
-                BindGroupEntry {
-                    binding: 0,
-                    resource: lenses_uniform_buffer.as_entire_binding(),
-                },
-                BindGroupEntry {
-                    binding: 1,
-                    resource: bounces_and_lengths_buffer.as_entire_binding(),
-                },
-                BindGroupEntry {
-                    binding: 2,
-                    resource: grids_vertex_buffer.as_entire_binding(),
-                },
-                BindGroupEntry {
-                    binding: 3,
-                    resource: grids_index_buffer.as_entire_binding(),
-                },
-            ],
+                &lenses_uniform_buffer,
+                &lens_system_uniform_buffer,
+                &bounces_and_lengths_buffer,
+                &grids_vertex_buffer,
+                &grids_index_buffer,
+            ]
+            .iter()
+            .enumerate()
+            .map(|(i, buffer)| BindGroupEntry {
+                binding: i as u32,
+                resource: buffer.as_entire_binding(),
+            })
+            .collect_vec(),
         });
 
         let lenses_bind_group_layout_id = bind_group_layouts.add(lenses_bind_group_layout);
@@ -338,7 +350,7 @@ impl State {
 
         let lenses_uniform = Uniform::new(
             lenses_uniform,
-            buffers.add(lenses_uniform_buffer),
+            buffers.add(lens_system_uniform_buffer),
             lenses_bind_group_layout_id.clone(),
             lenses_bind_group_id.clone(),
         );
@@ -501,13 +513,14 @@ impl State {
             params_uniform.bind_group_layout_id.clone(),
         ];
 
-        let mut composer = init_composer()?;
+
+        let mut compiler = Wesl::new("src/shaders");
 
         let mut render_pipelines = HashMap::new();
 
         Self::create_static_render_pipelines(
             &device,
-            &mut composer,
+            &mut compiler,
             &mut render_pipelines,
             &default_shader_bind_group_layouts
                 .iter()
@@ -517,8 +530,8 @@ impl State {
 
         let mut hot_reload_shaders = Vec::new();
 
-        hot_reload_shaders.push(HotReloadShader::new("src/shaders/shader.wgsl"));
-        hot_reload_shaders.push(HotReloadShader::new("src/shaders/fullscreen.wgsl"));
+        hot_reload_shaders.push(HotReloadShader::new("src/shaders/shader.wesl"));
+        hot_reload_shaders.push(HotReloadShader::new("src/shaders/fullscreen.wesl"));
 
         let (fullscreen_bind_group_layout_id, fullscreen_bind_group_id) = {
             let fullscreen_bind_group_layout =
@@ -623,7 +636,7 @@ impl State {
 
             default_shader_bind_group_layouts,
 
-            composer,
+            compiler,
             hot_reload_shaders,
 
             camera,
@@ -901,18 +914,17 @@ impl State {
 
     fn create_static_render_pipelines(
         device: &Device,
-        composer: &mut Composer,
+        compiler: &mut Wesl<StandardResolver>,
         render_pipelines: &mut HashMap<PipelineId, RenderPipeline>,
         default_bind_group_layouts: &Vec<&BindGroupLayout>,
     ) {
-        {
-            let lines_shader = create_shader(
-                device,
-                composer,
-                Some("Render Lines Shader"),
-                Path::new("src/shaders/lines.wgsl"),
-            )
-            .unwrap();
+        let lines_shader = create_shader(
+            device,
+            compiler,
+            Some("Render Lines Shader"),
+            "package::lines",
+        )
+        .unwrap();
 
         let render_pipeline_lines_layout =
             device.create_pipeline_layout(&PipelineLayoutDescriptor {
@@ -979,8 +991,7 @@ impl State {
 
     fn update_render_pipelines(&mut self) {
         for shader in self.hot_reload_shaders.iter_mut() {
-            let anyhow::Result::Ok(shader_result) = shader.try_hot_reload(&self.device, &mut self.composer)
-            else {
+            let Ok(shader_result) = shader.try_hot_reload(&self.device, &mut self.compiler) else {
                 continue;
             };
 
@@ -989,9 +1000,9 @@ impl State {
                 HotReloadResult::Unchanged => continue,
             };
 
-            if let Some(path) = shader.path.as_os_str().to_str() {
-                match path {
-                    "src/shaders/shader.wgsl" => {
+            if let Some(name) = shader.path.file_prefix().unwrap().to_str() {
+                match name {
+                    "shader" => {
                         let default_bind_group_layouts = self
                             .default_shader_bind_group_layouts
                             .iter()
@@ -1041,7 +1052,7 @@ impl State {
                             }
                         };
                     }
-                    "src/shaders/fullscreen.wgsl" => {
+                    "fullscreen" => {
                         let render_pipeline_layout =
                             self.device
                                 .create_pipeline_layout(&PipelineLayoutDescriptor {
@@ -1060,8 +1071,7 @@ impl State {
                                         module: &shader_module,
                                         entry_point: Some("vs_main"),
                                         buffers: &[],
-                                        compilation_options:
-                                            PipelineCompilationOptions::default(),
+                                        compilation_options: PipelineCompilationOptions::default(),
                                     },
                                     fragment: Some(FragmentState {
                                         module: &shader_module,
@@ -1071,8 +1081,7 @@ impl State {
                                             blend: Some(BlendState::REPLACE),
                                             write_mask: ColorWrites::ALL,
                                         })],
-                                        compilation_options:
-                                            PipelineCompilationOptions::default(),
+                                        compilation_options: PipelineCompilationOptions::default(),
                                     }),
                                     primitive: PrimitiveState {
                                         topology: PrimitiveTopology::TriangleList,

@@ -1,5 +1,3 @@
-#define_import_path colors
-
 /**
  * Convert a wavelength in the visible light spectrum to a RGB color value that is suitable to be displayed on a
  * monitor

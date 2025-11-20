@@ -1,8 +1,8 @@
+use crate::shaders::create_shader;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
-use naga_oil::compose::Composer;
+use wesl::{StandardResolver, Wesl};
 use wgpu::{Device, ShaderModule};
-use crate::shaders::create_shader;
 
 pub enum HotReloadResult {
     Updated(ShaderModule),
@@ -26,7 +26,7 @@ impl HotReloadShader {
         }
     }
 
-    pub fn try_hot_reload(&mut self, device: &Device, composer: &mut Composer) -> anyhow::Result<HotReloadResult> {
+    pub fn try_hot_reload(&mut self, device: &Device, compiler: &mut Wesl<StandardResolver>) -> anyhow::Result<HotReloadResult> {
         if self.shader_last_compilation_check.elapsed()? <= Duration::from_secs(1) {
             return Ok(HotReloadResult::Unchanged);
         }
@@ -39,7 +39,9 @@ impl HotReloadShader {
         if modified > self.shader_last_modification {
             self.shader_last_modification = SystemTime::now();
 
-            return match create_shader(device, composer, Some(&format!("Shader {}", self.path.display())), &self.path) {
+            let name = self.path.file_prefix().unwrap().to_str().unwrap();
+
+            return match create_shader(device, compiler, Some(&format!("Shader {}", self.path.display())), &format!("package::{name}")) {
                 Ok(shader) => {
                     self.shader_last_error = None;
 

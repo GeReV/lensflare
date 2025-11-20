@@ -6,7 +6,7 @@ edition = "2024"
 [dependencies]
 winit = "0.30"
 wgpu = { version = "25.0", features = ["naga-ir"] }
-naga_oil = "0.18"
+wesl = "0.2.0"
 imgui = "0.12"
 imgui-winit-support = "0.13"
 imgui-wgpu = "0.25"
