@@ -11,6 +11,7 @@ mod vertex;
 mod state;
 mod app;
 mod utils;
+mod ghost;
 
 use anyhow::*;
 use winit::event_loop::EventLoop;

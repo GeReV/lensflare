@@ -1,9 +1,10 @@
 use crate::arc::Arc;
 use crate::camera::{Camera, CameraController, Projection};
+// use crate::lenses::parse_lenses;
+use crate::ghost::draw_ghost;
 use crate::grids::Grids;
 use crate::hot_reload::{HotReloadResult, HotReloadShader};
 use crate::lenses::{Lens, LensInterface};
-// use crate::lenses::parse_lenses;
 use crate::registry::{Id, Registry};
 use crate::shaders::create_shader;
 use crate::software::calculate_grid_triangle_area_variance;
@@ -19,30 +20,17 @@ use imgui_wgpu::{Renderer, RendererConfig};
 use imgui_winit_support::WinitPlatform;
 use itertools::{Itertools, MinMaxResult};
 use std::collections::HashMap;
-use std::f32::consts::PI;
+use std::f32::consts::{PI, TAU};
 use std::time::{Duration, Instant};
 use wesl::{StandardResolver, Wesl};
 use wgpu::util::{BufferInitDescriptor, DeviceExt};
 use wgpu::wgt::{SamplerDescriptor, TextureDescriptor, TextureViewDescriptor};
-use wgpu::{
-    Backends, BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayout,
-    BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingResource, BindingType, BlendComponent,
-    BlendFactor, BlendOperation, BlendState, Buffer, BufferAddress, BufferBindingType,
-    BufferDescriptor, BufferUsages, Color, ColorTargetState, ColorWrites, CommandEncoderDescriptor,
-    Device, DeviceDescriptor, Extent3d, Face, Features, FragmentState, FrontFace, IndexFormat,
-    Instance, InstanceDescriptor, Label, Limits, LoadOp, MultisampleState, Operations,
-    PipelineCompilationOptions, PipelineLayoutDescriptor, PolygonMode, PowerPreference,
-    PresentMode, PrimitiveState, PrimitiveTopology, Queue, RenderPass, RenderPassColorAttachment,
-    RenderPassDescriptor, RenderPipeline, RenderPipelineDescriptor, RequestAdapterOptions,
-    SamplerBindingType, ShaderModule, ShaderStages, StoreOp, Surface, SurfaceConfiguration,
-    Texture, TextureDimension, TextureFormat, TextureSampleType, TextureUsages,
-    TextureViewDimension, Trace, VertexState,
-};
+use wgpu::{AddressMode, Backends, BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayout, BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingResource, BindingType, BlendComponent, BlendFactor, BlendOperation, BlendState, Buffer, BufferAddress, BufferBindingType, BufferDescriptor, BufferUsages, Color, ColorTargetState, ColorWrites, CommandEncoderDescriptor, Device, DeviceDescriptor, Extent3d, Face, Features, FilterMode, FragmentState, FrontFace, IndexFormat, Instance, InstanceDescriptor, Label, Limits, LoadOp, MultisampleState, Operations, PipelineCompilationOptions, PipelineLayoutDescriptor, PolygonMode, PowerPreference, PresentMode, PrimitiveState, PrimitiveTopology, Queue, RenderPass, RenderPassColorAttachment, RenderPassDescriptor, RenderPipeline, RenderPipelineDescriptor, RequestAdapterOptions, SamplerBindingType, ShaderModule, ShaderStages, StoreOp, Surface, SurfaceConfiguration, Texture, TextureDimension, TextureFormat, TextureSampleType, TextureUsages, TextureViewDimension, Trace, VertexState};
+use wgpu::wgc::resource::SamplerFilterErrorType::MipmapFilter;
 use winit::event::{MouseButton, MouseScrollDelta};
 use winit::event_loop::ActiveEventLoop;
 use winit::keyboard::KeyCode;
 use winit::window::Window;
-
 // TODO: Render ghosts without alpha?
 
 pub(crate) struct ImguiState {
@@ -122,6 +110,8 @@ pub struct State {
     grids_vertex_buffer: Buffer,
     grids_index_buffer: Buffer,
 
+    ghost_texture: Texture,
+
     static_lines_vertices: Vec<ColoredVertex>,
     static_lines_vertex_buffer: Buffer,
     ray_lines_vertices: Vec<ColoredVertex>,
@@ -187,6 +177,8 @@ impl State {
             view_formats: vec![],
             desired_maximum_frame_latency: 2,
         };
+
+        let mut compiler = Wesl::new("src/shaders");
 
         let mut buffers: Registry<Buffer> = Registry::new();
         let mut bind_group_layouts: Registry<BindGroupLayout> = Registry::new();
@@ -326,23 +318,25 @@ impl State {
                 ],
             });
 
-        let lenses_bind_group = device.create_bind_group(&BindGroupDescriptor {
-            label: Some("Lenses Bind Group"),
-            layout: &lenses_bind_group_layout,
-            entries: &[
-                &lenses_uniform_buffer,
-                &lens_system_uniform_buffer,
-                &bounces_and_lengths_buffer,
-                &grids_vertex_buffer,
-                &grids_index_buffer,
-            ]
+        let lenses_bind_group_entries = [
+            &lenses_uniform_buffer,
+            &lens_system_uniform_buffer,
+            &bounces_and_lengths_buffer,
+            &grids_vertex_buffer,
+            &grids_index_buffer,
+        ]
             .iter()
             .enumerate()
             .map(|(i, buffer)| BindGroupEntry {
                 binding: i as u32,
                 resource: buffer.as_entire_binding(),
             })
-            .collect_vec(),
+            .collect_vec();
+
+        let lenses_bind_group = device.create_bind_group(&BindGroupDescriptor {
+            label: Some("Lenses Bind Group"),
+            layout: &lenses_bind_group_layout,
+            entries: &lenses_bind_group_entries,
         });
 
         let lenses_bind_group_layout_id = bind_group_layouts.add(lenses_bind_group_layout);
@@ -441,16 +435,36 @@ impl State {
                     },
                     BindGroupLayoutEntry {
                         binding: 1,
-                        visibility: ShaderStages::VERTEX_FRAGMENT,
-                        ty: BindingType::Buffer {
-                            ty: BufferBindingType::Storage { read_only: true },
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
+                        visibility: ShaderStages::FRAGMENT,
+                        ty: BindingType::Sampler(SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                    BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: ShaderStages::FRAGMENT,
+                        ty: BindingType::Texture {
+                            sample_type: TextureSampleType::Float { filterable: true },
+                            view_dimension: TextureViewDimension::D2,
+                            multisampled: false,
                         },
                         count: None,
                     },
                 ],
             });
+
+        let ghost_texture = draw_ghost(&device, &queue, &mut compiler, 8, 0.9, 0.0)?;
+
+        let ghost_texture_sampler = device.create_sampler(&SamplerDescriptor {
+            label: Some("Ghost Texture Sampler"),
+            address_mode_u: AddressMode::ClampToEdge,
+            address_mode_v: AddressMode::ClampToEdge,
+            mag_filter: FilterMode::Linear,
+            min_filter: FilterMode::Linear,
+            mipmap_filter: FilterMode::Linear,
+            ..Default::default()
+        });
+
+        let ghost_texture_view = ghost_texture.create_view(&TextureViewDescriptor::default());
 
         let params_bind_group = device.create_bind_group(&BindGroupDescriptor {
             label: Some("Params Bind Group"),
@@ -462,8 +476,12 @@ impl State {
                 },
                 BindGroupEntry {
                     binding: 1,
-                    resource: grid_limits_buffer.as_entire_binding(),
+                    resource: BindingResource::Sampler(&ghost_texture_sampler),
                 },
+                BindGroupEntry {
+                    binding: 2,
+                    resource: BindingResource::TextureView(&ghost_texture_view),
+                }
             ],
         });
 
@@ -512,9 +530,6 @@ impl State {
             lenses_uniform.bind_group_layout_id.clone(),
             params_uniform.bind_group_layout_id.clone(),
         ];
-
-
-        let mut compiler = Wesl::new("src/shaders");
 
         let mut render_pipelines = HashMap::new();
 
@@ -587,6 +602,56 @@ impl State {
             (fullscreen_bind_group_layout_id, fullscreen_bind_group_id)
         };
 
+        // {
+        //     let ghost_texture_size = ghost_texture.size();
+        //
+        //     let output_buffer_size = (ghost_texture_size.width * ghost_texture_size.height * size_of::<u32>() as u32) as BufferAddress;
+        //     let output_buffer = device.create_buffer(&BufferDescriptor {
+        //         size: output_buffer_size,
+        //         usage: BufferUsages::COPY_DST | BufferUsages::MAP_READ,
+        //         label: None,
+        //         mapped_at_creation: false,
+        //     });
+        //
+        //     let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor { label: None });
+        //     encoder.copy_texture_to_buffer(
+        //         wgpu::TexelCopyTextureInfo {
+        //             aspect: wgpu::TextureAspect::All,
+        //             texture: &ghost_texture,
+        //             mip_level: 0,
+        //             origin: wgpu::Origin3d::ZERO,
+        //         },
+        //         wgpu::TexelCopyBufferInfo {
+        //             buffer: &output_buffer,
+        //             layout: wgpu::TexelCopyBufferLayout {
+        //                 offset: 0,
+        //                 bytes_per_row: Some(size_of::<u32>() as u32 * ghost_texture_size.width),
+        //                 rows_per_image: Some(ghost_texture_size.height),
+        //             },
+        //         },
+        //         ghost_texture_size,
+        //     );
+        //
+        //     queue.submit(Some(encoder.finish()));
+        //
+        //     {
+        //         let mut texture_data = Vec::with_capacity(output_buffer_size as usize);
+        //
+        //         let buffer_slice = output_buffer.slice(..);
+        //         let (sender, receiver) = std::sync::mpsc::channel();
+        //         buffer_slice.map_async(wgpu::MapMode::Read, move |r| sender.send(r).unwrap());
+        //         device.poll(wgpu::PollType::wait())?;
+        //         receiver.recv()??;
+        //         {
+        //             let view = buffer_slice.get_mapped_range();
+        //             texture_data.extend_from_slice(&view[..]);
+        //         }
+        //         output_buffer.unmap();
+        //
+        //         image::save_buffer("temp.png", &texture_data, ghost_texture_size.width, ghost_texture_size.height, image::ColorType::Rgba8)?;
+        //     }
+        // }
+
         let imgui = Self::setup_imgui(&window, &device, &queue, surface_format);
 
         {
@@ -658,6 +723,8 @@ impl State {
             bounces_grid_log2_sizes,
             grids_vertex_buffer,
             grids_index_buffer,
+
+            ghost_texture,
 
             static_lines_vertices,
             static_lines_vertex_buffer,

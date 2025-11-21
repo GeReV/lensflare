@@ -16,9 +16,8 @@ struct Params {
 @group(2) @binding(0)
 var<uniform> params: Params;
 
-//const GRID_LIMITS_SIZE: u32 = 16;
-//const GRID_LIMITS_COUNT: u32 = GRID_LIMITS_SIZE * GRID_LIMITS_SIZE;
-@group(2) @binding(1) var<storage, read> grid_limits: array<vec4f>;
+@group(2) @binding(1) var ghost_sampler : sampler;
+@group(2) @binding(2) var ghost_texture : texture_2d<f32>;
 
 //fn sample_grid_limits(bid: i32, ray_dir: vec3f) -> vec4f {
 //    let limits = grid_limits[bid];
@@ -103,14 +102,10 @@ fn vs_main(
         bid = i32(in.instance_index / 3);
     }
 
-    let grid_limit = grid_limits[bid];
-
-
     let normalized_pos = in.position.xy * 2 - 1;
 
     var in_pos: vec2f;
     in_pos = normalized_pos;
-    //in_pos = mix(grid_limit.xy, grid_limit.zw, in_pos);
 
     let sa = system.interfaces[0].sa;
 //    in_pos *= sa;
@@ -186,28 +181,16 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {
 
     let normalized_pos = in.position.xy * 2 - 1;
 
-    let l = sd_hexagon(in.position.xy - 0.5, f_stop * 0.5);
-//    let l = length(in.position.xy - 0.5);
-    let aperture = smoothstep(f_stop - 0.07, f_stop - 0.08, l);
-
-    var alpha = in.tex.a;
+    let alpha = in.tex.a;
 
     let ray_dir = normalize(params.ray_dir);
 
-    var color: vec4f;
-    color = vec4f(in.color.xyz, 1) * alpha * aperture;
+    let uv = (in.tex.xy / f_stop + 0.5);
+    let tex = textureSample(ghost_texture, ghost_sampler, uv);
 
-//    color = vec4f(reinhard(color);
+    let vignette = smoothstep(0.1, 0.5, 1 - length(in.position.xy * 2 - 1));
 
-//    color = vec4f(in.tex.xy, 0, 1);
+    let color = vec4f(in.color.xyz, 1);
 
-//    if in.tex.z > 1 {
-//        color = vec4f(1);
-//    }
-
-//    if in.tex.z > 1 {
-//        color.a = 0;
-//    }
-
-    return color;
+    return color * tex * vignette * alpha;
 }
