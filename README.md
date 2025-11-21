@@ -82,3 +82,13 @@ wavelength-dependent refraction, but I guess that's not really an issue.
 It's awfully tempting to keep using the reference code, but I'll try to keep that to a minimum.
 
 ![](screenshots/wip05.png)
+
+### 2025-11-21
+
+Decided to move on to improving the flare ghosts look. Right now I'm only rendering a basic, regular white n-gon as the
+texture for the ghosts.
+
+The next step will be to improve the texture using the Fourier Transform-related methods described in the paper,
+to get the ringing and color effects around the edges of the polygon.
+
+![](screenshots/wip06.png)
