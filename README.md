@@ -91,4 +91,7 @@ texture for the ghosts.
 The next step will be to improve the texture using the Fourier Transform-related methods described in the paper,
 to get the ringing and color effects around the edges of the polygon.
 
+For this feature, I will again try to avoid referencing the code from the repository mentioned above and instead try to 
+implement things myself based on the paper and the related papers it references for this.
+
 ![](screenshots/wip06.png)
