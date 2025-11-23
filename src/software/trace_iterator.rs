@@ -55,7 +55,7 @@ impl<'a> Iterator for TraceIterator<'a> {
         };
 
         // initialization
-        while self.k < length {
+        if self.k < length {
             let f = self.lens_interfaces[self.t];
             let b_reflect = if self.phase < 2 {
                 self.t == surfaces[self.phase] as usize
@@ -77,7 +77,7 @@ impl<'a> Iterator for TraceIterator<'a> {
             if !i.hit {
                 // exit upon miss
                 self.k += 1;
-                break;
+                return Some(result);
             }
 
             // record texture coord. or max. rel. radius
@@ -123,7 +123,7 @@ impl<'a> Iterator for TraceIterator<'a> {
                 if self.ray.dir == Vec3::ZERO {
                     // total reflection
                     self.k += 1;
-                    break;
+                    return Some(result);
                 }
             } else {
                 // reflection with anti-reflection coating
