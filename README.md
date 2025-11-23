@@ -126,7 +126,8 @@ I took me an entire day to get _something_ working, but I'm happy to say it work
 to the ones returned from the crate.
 
 Also managed to adapt it to work on images in the same manner described by ChatGPT. Again, without relying on any
-code snippets, but only its explanation.
+code snippets, but only its explanation. ChatGPT even provided suggestions and a useful roadmap for implementing 
+everything, including tips for debugging the code in locations where it's likely to fail.
 
 ![](screenshots/wip07.png)
 ![](screenshots/wip08.png)
