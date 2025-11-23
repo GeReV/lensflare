@@ -1,17 +1,23 @@
+use crate::fft::complex::Complex;
+use crate::fft::{fft_stockham, fftshift};
 use crate::shaders::create_shader;
 use crate::vertex::Vertex;
 use glam::Vec3;
+use itertools::Itertools;
+use rayon::prelude::*;
 use std::f32::consts::TAU;
+use rustfft::FftPlanner;
+use rustfft::num_complex::Complex32;
 use wesl::{StandardResolver, Wesl};
 use wgpu::util::{BufferInitDescriptor, DeviceExt};
 use wgpu::wgt::{TextureDescriptor, TextureViewDescriptor};
 use wgpu::{
-    BlendState, Color, ColorTargetState, ColorWrites, CommandEncoderDescriptor, Device, Extent3d,
-    FragmentState, FrontFace, IndexFormat, LoadOp, MultisampleState, Operations,
-    PipelineCompilationOptions, PipelineLayoutDescriptor, PolygonMode, PrimitiveState,
-    PrimitiveTopology, Queue, RenderPassColorAttachment, RenderPassDescriptor,
-    RenderPipelineDescriptor, StoreOp, Texture, TextureDimension, TextureFormat, TextureUsages,
-    VertexState,
+    BlendState, BufferAddress, BufferDescriptor, BufferUsages, Color, ColorTargetState,
+    ColorWrites, CommandEncoderDescriptor, Device, Extent3d, FragmentState, FrontFace, IndexFormat,
+    LoadOp, MultisampleState, Operations, PipelineCompilationOptions, PipelineLayoutDescriptor,
+    PolygonMode, PrimitiveState, PrimitiveTopology, Queue, RenderPassColorAttachment,
+    RenderPassDescriptor, RenderPipelineDescriptor, StoreOp, Texture, TextureDimension,
+    TextureFormat, TextureUsages, VertexState,
 };
 
 pub fn draw_ghost(
@@ -30,7 +36,7 @@ pub fn draw_ghost(
             depth_or_array_layers: 1,
         },
         dimension: TextureDimension::D2,
-        format: TextureFormat::Rgba8Unorm,
+        format: TextureFormat::R8Unorm,
         sample_count: 1,
         mip_level_count: 1,
         usage: TextureUsages::TEXTURE_BINDING
@@ -55,7 +61,7 @@ pub fn draw_ghost(
             });
 
         let targets = [Some(ColorTargetState {
-            format: TextureFormat::Rgba8Unorm,
+            format: TextureFormat::R8Unorm,
             blend: Some(BlendState::REPLACE),
             write_mask: ColorWrites::ALL,
         })];
@@ -103,13 +109,13 @@ pub fn draw_ghost(
     let vertex_buffer = device.create_buffer_init(&BufferInitDescriptor {
         label: Some("Ghost Vertex Buffer"),
         contents: bytemuck::cast_slice(&vertices),
-        usage: wgpu::BufferUsages::VERTEX,
+        usage: BufferUsages::VERTEX,
     });
 
     let index_buffer = device.create_buffer_init(&BufferInitDescriptor {
         label: Some("Ghost Index Buffer"),
         contents: bytemuck::cast_slice(&indices),
-        usage: wgpu::BufferUsages::INDEX,
+        usage: BufferUsages::INDEX,
     });
 
     let view = texture.create_view(&TextureViewDescriptor::default());
@@ -159,7 +165,7 @@ fn generate_polygon(sides: usize, radius: f32, rotation: f32) -> (Vec<Vertex>, V
     let mut start = TAU * 0.25 - rotation;
 
     // Rotate even-sided polygons so it sits on a flat base.
-    start += if sides % 2 == 0 {
+    start += if sides.is_multiple_of(2) {
         TAU / sides as f32 * 0.5
     } else {
         0.0
@@ -181,4 +187,152 @@ fn generate_polygon(sides: usize, radius: f32, rotation: f32) -> (Vec<Vertex>, V
     }
 
     (vertices, indices)
+}
+
+pub fn test_ghost(device: &Device, queue: &Queue, ghost_texture: &Texture) {
+    let ghost_texture_size = ghost_texture.size();
+
+    let output_buffer_size =
+        (ghost_texture_size.width * ghost_texture_size.height) as BufferAddress;
+    let output_buffer = device.create_buffer(&BufferDescriptor {
+        size: output_buffer_size,
+        usage: BufferUsages::COPY_DST | BufferUsages::MAP_READ,
+        label: None,
+        mapped_at_creation: false,
+    });
+
+    let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor { label: None });
+    encoder.copy_texture_to_buffer(
+        wgpu::TexelCopyTextureInfo {
+            aspect: wgpu::TextureAspect::All,
+            texture: ghost_texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+        },
+        wgpu::TexelCopyBufferInfo {
+            buffer: &output_buffer,
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(ghost_texture_size.width),
+                rows_per_image: Some(ghost_texture_size.height),
+            },
+        },
+        ghost_texture_size,
+    );
+
+    queue.submit(Some(encoder.finish()));
+
+    {
+        let mut texture_data = Vec::with_capacity(output_buffer_size as usize);
+
+        let buffer_slice = output_buffer.slice(..);
+        let (sender, receiver) = std::sync::mpsc::channel();
+        buffer_slice.map_async(wgpu::MapMode::Read, move |r| sender.send(r).unwrap());
+        device.poll(wgpu::PollType::wait()).unwrap();
+        receiver.recv().unwrap().unwrap();
+        {
+            let view = buffer_slice.get_mapped_range();
+            texture_data.extend_from_slice(&view[..]);
+        }
+        output_buffer.unmap();
+
+        let Extent3d { width, height, .. } = ghost_texture_size;
+
+        fft_image(&mut texture_data, width, height);
+    }
+}
+
+fn fft_image(data: &mut [u8], width: u32, height: u32) {
+    image::GrayImage::from_raw(width, height, data.to_vec())
+        .unwrap()
+        .save("temp0.png")
+        .unwrap();
+
+    let mut data = data
+        .iter()
+        .map(|&x| Complex::new((x as f32) / 255.0, 0.0))
+        .collect_vec();
+
+    fft_rows(&mut data, width as usize);
+
+    // image::GrayImage::from_raw(width, height, data.to_vec())
+    //     .unwrap()
+    //     .save("temp1.png")
+    //     .unwrap();
+
+    const N: usize = 32;
+    transpose_chunk::<_, N>(&mut data, width as usize);
+    transpose_blocks::<_, N>(&mut data, width as usize);
+
+    // image::GrayImage::from_raw(width, height, data.to_vec())
+    //     .unwrap()
+    //     .save("temp2.png")
+    //     .unwrap();
+
+    fft_rows(&mut data, width as usize);
+
+    // image::GrayImage::from_raw(width, height, data.to_vec())
+    //     .unwrap()
+    //     .save("temp3.png")
+    //     .unwrap();
+
+    fftshift(&mut data, width as usize);
+
+    image::GrayImage::from_raw(
+        width,
+        height,
+        data.iter().map(|x| x.re as u8).collect(),
+    )
+    .unwrap()
+    .save("temp4.png")
+    .unwrap();
+}
+
+fn fft_rows(data: &mut [Complex], width: usize) {
+    data.par_chunks_mut(width).for_each(fft_stockham);
+}
+
+fn transpose_chunk<T, const N: usize>(buffer: &mut [T], buffer_width: usize) {
+    let block_count = buffer_width / N;
+
+    for block_y in 0..block_count {
+        for block_x in 0..block_count {
+            let block_offset = (block_y * N) * buffer_width + block_x * N;
+
+            for y in 0..N {
+                for x in y + 1..N {
+                    let idx = block_offset + y * buffer_width + x;
+                    let idx_t = block_offset + x * buffer_width + y;
+
+                    buffer.swap(idx, idx_t);
+                }
+            }
+        }
+    }
+}
+
+fn transpose_blocks<T: Copy + Default, const N: usize>(buffer: &mut [T], buffer_width: usize) {
+    let block_count = buffer_width / N;
+
+    for block_y in 0..block_count {
+        for block_x in (block_y + 1)..block_count {
+            // Copy row-by-row.
+            for y in 0..N {
+                let src_offset = (block_y * N + y) * buffer_width + block_x * N;
+                let dst_offset = (block_x * N + y) * buffer_width + block_y * N;
+
+                let (src, dst) = buffer.split_at_mut(src_offset + N);
+
+                let mut temp = [T::default(); N];
+                temp.copy_from_slice(&src[src_offset..src_offset + N]);
+
+                let split_dst_offset = dst_offset - src_offset - N;
+
+                src[src_offset..src_offset + N]
+                    .copy_from_slice(&dst[split_dst_offset..split_dst_offset + N]);
+
+                dst[split_dst_offset..split_dst_offset + N].copy_from_slice(&temp);
+            }
+        }
+    }
 }

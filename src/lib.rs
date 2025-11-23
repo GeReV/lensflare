@@ -12,6 +12,7 @@ mod state;
 mod app;
 mod utils;
 mod ghost;
+mod fft;
 
 use anyhow::*;
 use winit::event_loop::EventLoop;

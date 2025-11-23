@@ -11,11 +11,11 @@ struct VertexInput {
 @vertex
 fn vs_main(in : VertexInput) -> VertexOutput {
   var output: VertexOutput;
-  output.position = vec4(in.position, 1.0);
+  output.position = vec4(in.position, 1);
   return output;
 }
 
 @fragment
-fn fs_main(in: VertexOutput) -> @location(0) vec4f {
-  return vec4f(1);
+fn fs_main(in: VertexOutput) -> @location(0) f32 {
+  return 1;
 }

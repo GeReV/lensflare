@@ -1,7 +1,7 @@
 use crate::arc::Arc;
 use crate::camera::{Camera, CameraController, Projection};
 // use crate::lenses::parse_lenses;
-use crate::ghost::draw_ghost;
+use crate::ghost::{draw_ghost, test_ghost};
 use crate::grids::Grids;
 use crate::hot_reload::{HotReloadResult, HotReloadShader};
 use crate::lenses::{Lens, LensInterface};
@@ -20,7 +20,7 @@ use imgui_wgpu::{Renderer, RendererConfig};
 use imgui_winit_support::WinitPlatform;
 use itertools::{Itertools, MinMaxResult};
 use std::collections::HashMap;
-use std::f32::consts::{PI, TAU};
+use std::f32::consts::PI;
 use std::time::{Duration, Instant};
 use wesl::{StandardResolver, Wesl};
 use wgpu::util::{BufferInitDescriptor, DeviceExt};
@@ -385,17 +385,6 @@ impl State {
                 .collect_vec()
         };
 
-        // let mut img = image::Rgba32FImage::new(16, 16);
-        // for (i, pixel) in img.pixels_mut().enumerate() {
-        //     let limit = grid_limits_uniform.limits[28][i];
-        //     *pixel = image::Rgba(limit.to_array());
-        // }
-        // let img8 = image::ImageBuffer::from_fn(img.width(), img.height(), |x, y| {
-        //     let p = img.get_pixel(x, y).0.map(|v| ((v + 0.5).clamp(0.0, 1.0) * 65535.0) as u16);
-        //     image::Rgba(p)
-        // });
-        // img8.save("grid_limits.png")?;
-
         let grid_limits_buffer = device.create_buffer_init(&BufferInitDescriptor {
             label: Some("Grid Limits Buffer"),
             usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
@@ -602,55 +591,7 @@ impl State {
             (fullscreen_bind_group_layout_id, fullscreen_bind_group_id)
         };
 
-        // {
-        //     let ghost_texture_size = ghost_texture.size();
-        //
-        //     let output_buffer_size = (ghost_texture_size.width * ghost_texture_size.height * size_of::<u32>() as u32) as BufferAddress;
-        //     let output_buffer = device.create_buffer(&BufferDescriptor {
-        //         size: output_buffer_size,
-        //         usage: BufferUsages::COPY_DST | BufferUsages::MAP_READ,
-        //         label: None,
-        //         mapped_at_creation: false,
-        //     });
-        //
-        //     let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor { label: None });
-        //     encoder.copy_texture_to_buffer(
-        //         wgpu::TexelCopyTextureInfo {
-        //             aspect: wgpu::TextureAspect::All,
-        //             texture: &ghost_texture,
-        //             mip_level: 0,
-        //             origin: wgpu::Origin3d::ZERO,
-        //         },
-        //         wgpu::TexelCopyBufferInfo {
-        //             buffer: &output_buffer,
-        //             layout: wgpu::TexelCopyBufferLayout {
-        //                 offset: 0,
-        //                 bytes_per_row: Some(size_of::<u32>() as u32 * ghost_texture_size.width),
-        //                 rows_per_image: Some(ghost_texture_size.height),
-        //             },
-        //         },
-        //         ghost_texture_size,
-        //     );
-        //
-        //     queue.submit(Some(encoder.finish()));
-        //
-        //     {
-        //         let mut texture_data = Vec::with_capacity(output_buffer_size as usize);
-        //
-        //         let buffer_slice = output_buffer.slice(..);
-        //         let (sender, receiver) = std::sync::mpsc::channel();
-        //         buffer_slice.map_async(wgpu::MapMode::Read, move |r| sender.send(r).unwrap());
-        //         device.poll(wgpu::PollType::wait())?;
-        //         receiver.recv()??;
-        //         {
-        //             let view = buffer_slice.get_mapped_range();
-        //             texture_data.extend_from_slice(&view[..]);
-        //         }
-        //         output_buffer.unmap();
-        //
-        //         image::save_buffer("temp.png", &texture_data, ghost_texture_size.width, ghost_texture_size.height, image::ColorType::Rgba8)?;
-        //     }
-        // }
+        test_ghost(&device, &queue, &ghost_texture);
 
         let imgui = Self::setup_imgui(&window, &device, &queue, surface_format);
 

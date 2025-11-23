@@ -79,7 +79,7 @@ impl CameraUniform {
 
     pub fn update_view_proj(&mut self, camera: &Camera, projection: &Projection) {
         self.view_position = camera.position.extend(1.0);
-        self.view_proj = (projection.calc_matrix() * camera.calc_matrix());
+        self.view_proj = projection.calc_matrix() * camera.calc_matrix();
     }
 }
 
@@ -141,7 +141,7 @@ impl From<&[LensInterface]> for LensSystemUniform {
             let mut n2_idx: isize = -1;
 
             //if medium is not AIR, we must detect lens property
-            if(n0 != 1.0 || n2 != 1.0)
+            if n0 != 1.0 || n2 != 1.0
             {
                 let mut n0_idx_diff = f32::MAX;
                 let mut n2_idx_diff = f32::MAX;
