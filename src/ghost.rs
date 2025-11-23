@@ -6,8 +6,6 @@ use glam::Vec3;
 use itertools::Itertools;
 use rayon::prelude::*;
 use std::f32::consts::TAU;
-use rustfft::FftPlanner;
-use rustfft::num_complex::Complex32;
 use wesl::{StandardResolver, Wesl};
 use wgpu::util::{BufferInitDescriptor, DeviceExt};
 use wgpu::wgt::{TextureDescriptor, TextureViewDescriptor};
@@ -248,43 +246,32 @@ fn fft_image(data: &mut [u8], width: u32, height: u32) {
         .save("temp0.png")
         .unwrap();
 
-    let mut data = data
+    let mut complex = data
         .iter()
         .map(|&x| Complex::new((x as f32) / 255.0, 0.0))
         .collect_vec();
 
-    fft_rows(&mut data, width as usize);
-
-    // image::GrayImage::from_raw(width, height, data.to_vec())
-    //     .unwrap()
-    //     .save("temp1.png")
-    //     .unwrap();
+    fft_rows(&mut complex, width as usize);
 
     const N: usize = 32;
-    transpose_chunk::<_, N>(&mut data, width as usize);
-    transpose_blocks::<_, N>(&mut data, width as usize);
+    transpose_chunk::<_, N>(&mut complex, width as usize);
+    transpose_blocks::<_, N>(&mut complex, width as usize);
 
-    // image::GrayImage::from_raw(width, height, data.to_vec())
-    //     .unwrap()
-    //     .save("temp2.png")
-    //     .unwrap();
+    fft_rows(&mut complex, width as usize);
 
-    fft_rows(&mut data, width as usize);
+    fftshift(&mut complex, width as usize);
 
-    // image::GrayImage::from_raw(width, height, data.to_vec())
-    //     .unwrap()
-    //     .save("temp3.png")
-    //     .unwrap();
+    let bytes = complex.iter().map(|x| x.re as u8).collect::<Vec<_>>();
 
-    fftshift(&mut data, width as usize);
+    data.copy_from_slice(&bytes);
 
     image::GrayImage::from_raw(
         width,
         height,
-        data.iter().map(|x| x.re as u8).collect(),
+        bytes,
     )
     .unwrap()
-    .save("temp4.png")
+    .save("temp1.png")
     .unwrap();
 }
 
