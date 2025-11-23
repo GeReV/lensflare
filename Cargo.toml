@@ -21,4 +21,9 @@ itertools = "0.14.0"
 glam = { version = "0.30.9", features = ["default", "encase", "bytemuck"]}
 encase = "0.12.0"
 color = "0.3.2"
+rayon = "1.11"
 image = "0.25"
+
+[dev-dependencies]
+rand = "0.9"
+rustfft = "6.4"
