@@ -1,9 +1,12 @@
-use crate::fft::complex::Complex;
-use crate::fft::{fft_stockham, fftshift};
+use crate::colors::wavelength_to_rgb;
+use crate::fft::angular_spectrum::angular_spectrum;
 use crate::shaders::create_shader;
 use crate::vertex::Vertex;
 use glam::Vec3;
+use image::buffer::ConvertBuffer;
+use image::{DynamicImage, EncodableLayout, GrayImage, Pixel, Rgba, Rgba32FImage, RgbaImage};
 use itertools::Itertools;
+use num_complex::Complex32;
 use rayon::prelude::*;
 use std::f32::consts::TAU;
 use wesl::{StandardResolver, Wesl};
@@ -18,10 +21,11 @@ use wgpu::{
     TextureFormat, TextureUsages, VertexState,
 };
 
-pub fn draw_ghost(
+pub fn draw_ghost_polygon(
     device: &Device,
     queue: &Queue,
     compiler: &mut Wesl<StandardResolver>,
+    size: u32,
     polygon_sides: usize,
     polygon_radius: f32,
     polygon_rotation: f32,
@@ -29,8 +33,8 @@ pub fn draw_ghost(
     let texture = device.create_texture(&TextureDescriptor {
         label: Some("Ghost Texture"),
         size: Extent3d {
-            width: 1024,
-            height: 1024,
+            width: size,
+            height: size,
             depth_or_array_layers: 1,
         },
         dimension: TextureDimension::D2,
@@ -47,7 +51,7 @@ pub fn draw_ghost(
         device,
         compiler,
         Some("Render Ghost Shader"),
-        "package::ghost",
+        "package::ghost_polygon",
     )?;
 
     let render_pipeline = {
@@ -151,6 +155,129 @@ pub fn draw_ghost(
     Ok(texture)
 }
 
+pub fn draw_ghost_sdf(
+    device: &Device,
+    queue: &Queue,
+    compiler: &mut Wesl<StandardResolver>,
+    size: u32,
+    polygon_sides: usize,
+    polygon_radius: f32,
+    polygon_rotation: f32,
+) -> anyhow::Result<Texture> {
+    let texture = device.create_texture(&TextureDescriptor {
+        label: Some("Ghost Texture"),
+        size: Extent3d {
+            width: size,
+            height: size,
+            depth_or_array_layers: 1,
+        },
+        dimension: TextureDimension::D2,
+        format: TextureFormat::R8Unorm,
+        sample_count: 1,
+        mip_level_count: 1,
+        usage: TextureUsages::TEXTURE_BINDING
+            | TextureUsages::RENDER_ATTACHMENT
+            | TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+
+    compiler.add_constants([
+        ("polygon_sides", polygon_sides as f64),
+        ("polygon_radius", polygon_radius as f64),
+        ("polygon_rotation", polygon_rotation as f64),
+    ]);
+
+    let shader = create_shader(
+        device,
+        compiler,
+        Some("Render Ghost Shader"),
+        "package::ghost_sdf",
+    )?;
+
+    let render_pipeline = {
+        let render_pipeline_lines_layout =
+            device.create_pipeline_layout(&PipelineLayoutDescriptor {
+                label: Some("Render Ghost Pipeline Layout"),
+                bind_group_layouts: &[],
+                push_constant_ranges: &[],
+            });
+
+        let targets = [Some(ColorTargetState {
+            format: TextureFormat::R8Unorm,
+            blend: Some(BlendState::REPLACE),
+            write_mask: ColorWrites::ALL,
+        })];
+
+        device.create_render_pipeline(&RenderPipelineDescriptor {
+            label: Some("Render Ghost Pipeline"),
+            layout: Some(&render_pipeline_lines_layout),
+            vertex: VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: PipelineCompilationOptions::default(),
+            },
+            fragment: Some(FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                targets: &targets,
+                compilation_options: PipelineCompilationOptions::default(),
+            }),
+            primitive: PrimitiveState {
+                topology: PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: FrontFace::Cw,
+                cull_mode: None,
+                // Setting this to anything other than Fill requires Features::NON_FILL_POLYGON_MODE
+                polygon_mode: PolygonMode::Fill,
+                // Requires Features::DEPTH_CLIP_CONTROL
+                unclipped_depth: false,
+                // Requires Features::CONSERVATIVE_RASTERIZATION
+                conservative: false,
+            },
+            multisample: MultisampleState {
+                count: 1,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
+            depth_stencil: None,
+            multiview: None,
+            cache: None,
+        })
+    };
+
+    let view = texture.create_view(&TextureViewDescriptor::default());
+
+    let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
+        label: Some("Render Ghost Encoder"),
+    });
+
+    {
+        let mut render_pass = encoder.begin_render_pass(&RenderPassDescriptor {
+            label: Some("Ghost Texture Pass"),
+            color_attachments: &[Some(RenderPassColorAttachment {
+                view: &view,
+                resolve_target: None,
+                ops: Operations {
+                    load: LoadOp::Clear(Color::TRANSPARENT),
+                    store: StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+        });
+
+        render_pass.set_pipeline(&render_pipeline);
+
+        render_pass.draw(0..3, 0..1);
+    }
+
+    queue.submit(Some(encoder.finish()));
+
+    Ok(texture)
+}
+
 fn generate_polygon(sides: usize, radius: f32, rotation: f32) -> (Vec<Vertex>, Vec<u32>) {
     let mut vertices = Vec::with_capacity(sides + 1);
     let mut indices = Vec::with_capacity(sides * 3);
@@ -187,11 +314,12 @@ fn generate_polygon(sides: usize, radius: f32, rotation: f32) -> (Vec<Vertex>, V
     (vertices, indices)
 }
 
-pub fn test_ghost(device: &Device, queue: &Queue, ghost_texture: &Texture) {
-    let ghost_texture_size = ghost_texture.size();
+pub fn copy_texture_to_image(device: &Device, queue: &Queue, texture: &Texture) -> DynamicImage {
+    let texture_size = texture.size();
 
-    let output_buffer_size =
-        (ghost_texture_size.width * ghost_texture_size.height) as BufferAddress;
+    let bpp = texture.format().target_pixel_byte_cost().unwrap_or(1);
+
+    let output_buffer_size = (texture_size.width * texture_size.height * bpp) as BufferAddress;
     let output_buffer = device.create_buffer(&BufferDescriptor {
         size: output_buffer_size,
         usage: BufferUsages::COPY_DST | BufferUsages::MAP_READ,
@@ -203,7 +331,7 @@ pub fn test_ghost(device: &Device, queue: &Queue, ghost_texture: &Texture) {
     encoder.copy_texture_to_buffer(
         wgpu::TexelCopyTextureInfo {
             aspect: wgpu::TextureAspect::All,
-            texture: ghost_texture,
+            texture,
             mip_level: 0,
             origin: wgpu::Origin3d::ZERO,
         },
@@ -211,115 +339,84 @@ pub fn test_ghost(device: &Device, queue: &Queue, ghost_texture: &Texture) {
             buffer: &output_buffer,
             layout: wgpu::TexelCopyBufferLayout {
                 offset: 0,
-                bytes_per_row: Some(ghost_texture_size.width),
-                rows_per_image: Some(ghost_texture_size.height),
+                bytes_per_row: Some(texture_size.width * bpp as u32),
+                rows_per_image: Some(texture_size.height),
             },
         },
-        ghost_texture_size,
+        texture_size,
     );
 
     queue.submit(Some(encoder.finish()));
 
+    let mut texture_data = Vec::with_capacity(output_buffer_size as usize);
+
+    let buffer_slice = output_buffer.slice(..);
+    let (sender, receiver) = std::sync::mpsc::channel();
+    buffer_slice.map_async(wgpu::MapMode::Read, move |r| sender.send(r).unwrap());
+    device.poll(wgpu::PollType::wait()).unwrap();
+    receiver.recv().unwrap().unwrap();
     {
-        let mut texture_data = Vec::with_capacity(output_buffer_size as usize);
+        let view = buffer_slice.get_mapped_range();
+        texture_data.extend_from_slice(&view[..]);
+    }
+    output_buffer.unmap();
 
-        let buffer_slice = output_buffer.slice(..);
-        let (sender, receiver) = std::sync::mpsc::channel();
-        buffer_slice.map_async(wgpu::MapMode::Read, move |r| sender.send(r).unwrap());
-        device.poll(wgpu::PollType::wait()).unwrap();
-        receiver.recv().unwrap().unwrap();
-        {
-            let view = buffer_slice.get_mapped_range();
-            texture_data.extend_from_slice(&view[..]);
-        }
-        output_buffer.unmap();
-
-        let Extent3d { width, height, .. } = ghost_texture_size;
-
-        fft_image(&mut texture_data, width, height);
+    match texture.format() {
+        TextureFormat::R8Unorm
+        | TextureFormat::R8Snorm
+        | TextureFormat::R8Uint
+        | TextureFormat::R8Sint => DynamicImage::ImageLuma8(
+            GrayImage::from_raw(texture_size.width, texture_size.height, texture_data).unwrap(),
+        ),
+        TextureFormat::Rgba8UnormSrgb
+        | TextureFormat::Rgba8Unorm
+        | TextureFormat::Rgba8Uint
+        | TextureFormat::Rgba8Sint
+        | TextureFormat::Rgba8Snorm => DynamicImage::ImageRgba8(
+            RgbaImage::from_raw(texture_size.width, texture_size.height, texture_data).unwrap(),
+        ),
+        _ => unimplemented!("Unsupported texture format"),
     }
 }
 
-fn fft_image(data: &mut [u8], width: u32, height: u32) {
-    image::GrayImage::from_raw(width, height, data.to_vec())
-        .unwrap()
-        .save("temp0.png")
-        .unwrap();
+pub fn fft_ghost(image: GrayImage, delta: f32, z: f32, wavelengths: impl IntoIterator<Item = f32>) -> RgbaImage {
+    let (width, height) = image.dimensions();
 
-    let mut complex = data
+    let mut img = Rgba32FImage::new(width, height);
+
+    let data = image
+        .as_bytes()
         .iter()
-        .map(|&x| Complex::new((x as f32) / 255.0, 0.0))
+        .map(|&x| Complex32::new((x as f32) / 255.0, 0.0))
         .collect_vec();
 
-    fft_rows(&mut complex, width as usize);
+    let wavelengths = wavelengths.into_iter().collect_vec();
 
-    const N: usize = 32;
-    transpose_chunk::<_, N>(&mut complex, width as usize);
-    transpose_blocks::<_, N>(&mut complex, width as usize);
+    for &wavelength in &wavelengths {
+        let mut data = data.clone();
 
-    fft_rows(&mut complex, width as usize);
+        let wavelength_meters = wavelength * 1e-9;
 
-    fftshift(&mut complex, width as usize);
+        angular_spectrum(&mut data, width as usize, delta, z, wavelength_meters);
 
-    let bytes = complex.iter().map(|x| x.re as u8).collect::<Vec<_>>();
+        let values = data.iter().map(|x| x.norm()).collect::<Vec<_>>();
 
-    data.copy_from_slice(&bytes);
+        let color = wavelength_to_rgb(wavelength);
 
-    image::GrayImage::from_raw(
-        width,
-        height,
-        bytes,
-    )
-    .unwrap()
-    .save("temp1.png")
-    .unwrap();
-}
+        img.par_pixels_mut().zip(values).for_each(|(base, v)| {
+            let pixel = Rgba((color * v).extend(v).to_array());
 
-fn fft_rows(data: &mut [Complex], width: usize) {
-    data.par_chunks_mut(width).for_each(fft_stockham);
-}
-
-fn transpose_chunk<T, const N: usize>(buffer: &mut [T], buffer_width: usize) {
-    let block_count = buffer_width / N;
-
-    for block_y in 0..block_count {
-        for block_x in 0..block_count {
-            let block_offset = (block_y * N) * buffer_width + block_x * N;
-
-            for y in 0..N {
-                for x in y + 1..N {
-                    let idx = block_offset + y * buffer_width + x;
-                    let idx_t = block_offset + x * buffer_width + y;
-
-                    buffer.swap(idx, idx_t);
-                }
-            }
-        }
+            base.apply2(&pixel, |a, b| a + b);
+        });
     }
-}
 
-fn transpose_blocks<T: Copy + Default, const N: usize>(buffer: &mut [T], buffer_width: usize) {
-    let block_count = buffer_width / N;
+    let l = wavelengths.len() as f32;
 
-    for block_y in 0..block_count {
-        for block_x in (block_y + 1)..block_count {
-            // Copy row-by-row.
-            for y in 0..N {
-                let src_offset = (block_y * N + y) * buffer_width + block_x * N;
-                let dst_offset = (block_x * N + y) * buffer_width + block_y * N;
+    img.par_pixels_mut().for_each(|pixel| {
+        pixel.apply(|p| p / l);
+    });
 
-                let (src, dst) = buffer.split_at_mut(src_offset + N);
+    let img: RgbaImage = img.convert();
 
-                let mut temp = [T::default(); N];
-                temp.copy_from_slice(&src[src_offset..src_offset + N]);
-
-                let split_dst_offset = dst_offset - src_offset - N;
-
-                src[src_offset..src_offset + N]
-                    .copy_from_slice(&dst[split_dst_offset..split_dst_offset + N]);
-
-                dst[split_dst_offset..split_dst_offset + N].copy_from_slice(&temp);
-            }
-        }
-    }
+    img
 }

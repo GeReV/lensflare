@@ -68,6 +68,19 @@ fn edge_factor(bary: vec3f, thickness: f32) -> f32 {
   return min(min(a3.x, a3.y), a3.z);
 }
 
+// A quad ABCD's area is calculated as the area of the two triangles making it.
+// Each triangle's area is calculated as half of the magnitude of cross-product of its edges.
+// The magnitude of a cross-product between two vectors is the area of the parallelogram created by AB and AC.
+// i.e. for triangle ABC, |ABxAC| / 2.
+fn quad_area(a: vec2f, b: vec2f, c: vec2f, d: vec2f) -> f32 {
+    let ab = length(a - b);
+    let ac = length(a - c);
+    let bd = length(b - d);
+    let cd = length(c - d);
+
+    return (length(cross(ab, ac)) + length(cross(bd, cd))) * 0.5;
+}
+
 fn calculate_grid_start_index(vertex_index: u32) -> u32 {
     var i: u32 = 0;
     var prev_start_index: u32 = 0;
@@ -85,6 +98,26 @@ fn calculate_grid_start_index(vertex_index: u32) -> u32 {
     }
 
     return prev_start_index;
+}
+
+fn calculate_grid_scale(vertex_index: u32) -> f32 {
+    let grid_start_index = calculate_grid_start_index(vertex_index);
+    let grid_size = sqrt(grid_start_index);
+
+    let base_cell_width = 2 / f32(grid_size);
+    let base_cell_area = base_cell_width * base_cell_width;
+
+    // The 9 vertices around and including vertex_index.
+    let a = vertices[vertex_index - grid_size - 1];
+    let b = vertices[vertex_index - grid_size + 0];
+    let c = vertices[vertex_index - grid_size + 1];
+    let d = vertices[vertex_index - 1];
+    let e = vertices[vertex_index + 0];
+    let f = vertices[vertex_index + 1];
+    let g = vertices[vertex_index + grid_size - 1];
+    let h = vertices[vertex_index + grid_size + 0];
+    let i = vertices[vertex_index + grid_size + 1];
+
 }
 
 @vertex
@@ -192,5 +225,5 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {
 
     let color = vec4f(in.color.xyz, 1);
 
-    return color * tex * vignette * alpha;
+    return color * tex * vignette * alpha * params.intensity;
 }

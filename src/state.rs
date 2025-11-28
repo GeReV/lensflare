@@ -1,7 +1,6 @@
 use crate::arc::Arc;
 use crate::camera::{Camera, CameraController, Projection};
-// use crate::lenses::parse_lenses;
-use crate::ghost::{draw_ghost, test_ghost};
+use crate::ghost::{copy_texture_to_image, draw_ghost_sdf, fft_ghost};
 use crate::grids::Grids;
 use crate::hot_reload::{HotReloadResult, HotReloadShader};
 use crate::lenses::{Lens, LensInterface};
@@ -15,6 +14,7 @@ use crate::uniforms::{
 use crate::vertex::{ColoredVertex, Vertex};
 use encase::{StorageBuffer, UniformBuffer};
 use glam::{vec3, vec4, Vec3, Vec3Swizzles, Vec4};
+use image::GenericImageView;
 use imgui::{Condition, FontSource, MouseCursor};
 use imgui_wgpu::{Renderer, RendererConfig};
 use imgui_winit_support::WinitPlatform;
@@ -23,10 +23,22 @@ use std::collections::HashMap;
 use std::f32::consts::PI;
 use std::time::{Duration, Instant};
 use wesl::{StandardResolver, Wesl};
-use wgpu::util::{BufferInitDescriptor, DeviceExt};
+use wgpu::util::{BufferInitDescriptor, DeviceExt, TextureDataOrder};
 use wgpu::wgt::{SamplerDescriptor, TextureDescriptor, TextureViewDescriptor};
-use wgpu::{AddressMode, Backends, BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayout, BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingResource, BindingType, BlendComponent, BlendFactor, BlendOperation, BlendState, Buffer, BufferAddress, BufferBindingType, BufferDescriptor, BufferUsages, Color, ColorTargetState, ColorWrites, CommandEncoderDescriptor, Device, DeviceDescriptor, Extent3d, Face, Features, FilterMode, FragmentState, FrontFace, IndexFormat, Instance, InstanceDescriptor, Label, Limits, LoadOp, MultisampleState, Operations, PipelineCompilationOptions, PipelineLayoutDescriptor, PolygonMode, PowerPreference, PresentMode, PrimitiveState, PrimitiveTopology, Queue, RenderPass, RenderPassColorAttachment, RenderPassDescriptor, RenderPipeline, RenderPipelineDescriptor, RequestAdapterOptions, SamplerBindingType, ShaderModule, ShaderStages, StoreOp, Surface, SurfaceConfiguration, Texture, TextureDimension, TextureFormat, TextureSampleType, TextureUsages, TextureViewDimension, Trace, VertexState};
-use wgpu::wgc::resource::SamplerFilterErrorType::MipmapFilter;
+use wgpu::{
+    AddressMode, Backends, BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayout,
+    BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingResource, BindingType, BlendComponent,
+    BlendFactor, BlendOperation, BlendState, Buffer, BufferAddress, BufferBindingType,
+    BufferDescriptor, BufferUsages, Color, ColorTargetState, ColorWrites, CommandEncoderDescriptor,
+    Device, DeviceDescriptor, Extent3d, Face, Features, FilterMode, FragmentState, FrontFace,
+    IndexFormat, Instance, InstanceDescriptor, Label, Limits, LoadOp, MultisampleState, Operations,
+    PipelineCompilationOptions, PipelineLayoutDescriptor, PolygonMode, PowerPreference,
+    PresentMode, PrimitiveState, PrimitiveTopology, Queue, RenderPass, RenderPassColorAttachment,
+    RenderPassDescriptor, RenderPipeline, RenderPipelineDescriptor, RequestAdapterOptions,
+    SamplerBindingType, ShaderModule, ShaderStages, StoreOp, Surface, SurfaceConfiguration,
+    Texture, TextureDimension, TextureFormat, TextureSampleType, TextureUsages,
+    TextureViewDimension, Trace, VertexState,
+};
 use winit::event::{MouseButton, MouseScrollDelta};
 use winit::event_loop::ActiveEventLoop;
 use winit::keyboard::KeyCode;
@@ -325,13 +337,13 @@ impl State {
             &grids_vertex_buffer,
             &grids_index_buffer,
         ]
-            .iter()
-            .enumerate()
-            .map(|(i, buffer)| BindGroupEntry {
-                binding: i as u32,
-                resource: buffer.as_entire_binding(),
-            })
-            .collect_vec();
+        .iter()
+        .enumerate()
+        .map(|(i, buffer)| BindGroupEntry {
+            binding: i as u32,
+            resource: buffer.as_entire_binding(),
+        })
+        .collect_vec();
 
         let lenses_bind_group = device.create_bind_group(&BindGroupDescriptor {
             label: Some("Lenses Bind Group"),
@@ -393,11 +405,73 @@ impl State {
             )?,
         });
 
+        let ghost_texture = draw_ghost_sdf(
+            &device,
+            &queue,
+            &mut compiler,
+            512,
+            8,
+            0.75,
+            -3.0_f32.to_radians(),
+        )?;
+
+        let ghost_image = copy_texture_to_image(&device, &queue, &ghost_texture);
+        ghost_image.save("ghost_aperture.png")?;
+
+        {
+            // Pixel size in meters
+            let aperture_size = 14.0 * 1e-3;
+            let dx = aperture_size / ghost_image.width() as f32;
+            let dx = 10e-6;
+
+            // Focal length in meters
+            let z = 20e-3;
+
+            let wavelengths_nm = (380..800).step_by(5).map(|wavelength| wavelength as f32);
+
+            let ghost_image = fft_ghost(ghost_image.into_luma8(), dx, z, wavelengths_nm);
+            ghost_image.save("ghost.png")?;
+        }
+
+        let ghost_image = image::open("ghost.png")?;
+
+        let ghost_texture = device.create_texture_with_data(
+            &queue,
+            &TextureDescriptor {
+                label: Some("Ghost Texture"),
+                size: Extent3d {
+                    width: ghost_image.width(),
+                    height: ghost_image.height(),
+                    depth_or_array_layers: 1,
+                },
+                dimension: TextureDimension::D2,
+                format: TextureFormat::Rgba8Unorm,
+                usage: TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+                mip_level_count: 1,
+                sample_count: 1,
+            },
+            TextureDataOrder::LayerMajor,
+            ghost_image.as_bytes(),
+        );
+
+        let ghost_texture_sampler = device.create_sampler(&SamplerDescriptor {
+            label: Some("Ghost Texture Sampler"),
+            address_mode_u: AddressMode::ClampToEdge,
+            address_mode_v: AddressMode::ClampToEdge,
+            mag_filter: FilterMode::Linear,
+            min_filter: FilterMode::Linear,
+            mipmap_filter: FilterMode::Linear,
+            ..Default::default()
+        });
+
+        let ghost_texture_view = ghost_texture.create_view(&TextureViewDescriptor::default());
+
         let params = ParamsUniform {
             debug_wireframe_alpha: 0.0,
             debug_interpolate: 1.0,
             ray_dir,
-            bid: 45,
+            bid: -1,
             intensity: 0.5,
             lambda: 520.0, // 520 nm is some green color.
         };
@@ -441,20 +515,6 @@ impl State {
                 ],
             });
 
-        let ghost_texture = draw_ghost(&device, &queue, &mut compiler, 8, 0.9, 0.0)?;
-
-        let ghost_texture_sampler = device.create_sampler(&SamplerDescriptor {
-            label: Some("Ghost Texture Sampler"),
-            address_mode_u: AddressMode::ClampToEdge,
-            address_mode_v: AddressMode::ClampToEdge,
-            mag_filter: FilterMode::Linear,
-            min_filter: FilterMode::Linear,
-            mipmap_filter: FilterMode::Linear,
-            ..Default::default()
-        });
-
-        let ghost_texture_view = ghost_texture.create_view(&TextureViewDescriptor::default());
-
         let params_bind_group = device.create_bind_group(&BindGroupDescriptor {
             label: Some("Params Bind Group"),
             layout: &params_bind_group_layout,
@@ -470,7 +530,7 @@ impl State {
                 BindGroupEntry {
                     binding: 2,
                     resource: BindingResource::TextureView(&ghost_texture_view),
-                }
+                },
             ],
         });
 
@@ -590,8 +650,6 @@ impl State {
 
             (fullscreen_bind_group_layout_id, fullscreen_bind_group_id)
         };
-
-        test_ghost(&device, &queue, &ghost_texture);
 
         let imgui = Self::setup_imgui(&window, &device, &queue, surface_format);
 

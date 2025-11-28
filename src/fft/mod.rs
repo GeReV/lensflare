@@ -1,26 +1,42 @@
-use crate::fft::complex::Complex;
 use std::f32::consts::TAU;
+use itertools::Itertools;
+use num_complex::{Complex32, Complex64};
 use rayon::prelude::*;
 
-pub mod complex;
+mod utils;
+pub mod frft;
+pub mod fresnel;
+pub mod angular_spectrum;
 
-fn calculate_twiddles(n: usize) -> Box<[Complex]> {
+fn calculate_twiddles(n: usize) -> Box<[Complex32]> {
     let mut result = Vec::with_capacity(n);
 
     for k in 0..n {
-        result.push(Complex::exp(-TAU * k as f32 / n as f32));
+        result.push(Complex32::cis(-TAU * k as f32 / n as f32));
     }
 
     result.into_boxed_slice()
 }
 
+pub(crate) fn fftshift<T: Send>(data: &mut [T], width: usize) {
+    // Swap bottom rows with top rows.
+    let (a, b) = data.split_at_mut(data.len() / 2);
+    a.swap_with_slice(b);
+
+    data.par_chunks_exact_mut(width).for_each(|row_data| {
+        let (a, b) = row_data.split_at_mut(width / 2);
+
+        a.swap_with_slice(b);
+    });
+}
+
 fn fft_step_stockham(
-    data: &[Complex],
-    twiddles: &[Complex],
+    data: &[Complex32],
+    twiddles: &[Complex32],
     x: usize,
     n: usize,
     n_s: usize,
-) -> Complex {
+) -> Complex32 {
     let base = x / n_s * (n_s / 2);
     let offset = x % (n_s / 2);
 
@@ -33,10 +49,12 @@ fn fft_step_stockham(
     let e_idx = x * (n / n_s) % n;
     let e = twiddles[e_idx];
 
+    let e = Complex32::cis(-TAU * x as f32 / n_s as f32);
+
     a + b * e
 }
 
-pub fn fft_stockham(data: &mut [Complex]) {
+pub fn fft_stockham(data: &mut [Complex32]) {
     let len = data.len();
 
     assert!(len.is_power_of_two());
@@ -45,7 +63,7 @@ pub fn fft_stockham(data: &mut [Complex]) {
 
     // TODO: Any way to avoid this and the later copy?
     let mut a = Vec::from(&*data);
-    let mut b = vec![Complex::ZERO; len];
+    let mut b = vec![Complex32::ZERO; len];
 
     for iter in 0..len.ilog2() {
         let n_s = 1 << (iter + 1);
@@ -60,16 +78,57 @@ pub fn fft_stockham(data: &mut [Complex]) {
     data.copy_from_slice(&a);
 }
 
-pub fn fftshift<T: Send>(data: &mut [T], width: usize) {
-    // Swap bottom rows with top rows.
-    let (a, b) = data.split_at_mut(data.len() / 2);
-    a.swap_with_slice(b);
+fn fft_rows(data: &mut [Complex32], width: usize) {
+    data.par_chunks_mut(width).for_each(fft_stockham);
+}
 
-    data.par_chunks_exact_mut(width).for_each(|row_data| {
-        let (a, b) = row_data.split_at_mut(width / 2);
+pub(crate) fn fft2d(data: &mut [Complex32], size: usize) {
+    assert!(size.is_power_of_two());
 
-        a.swap_with_slice(b);
-    });
+    fft_rows(data, size);
+
+    const N: usize = 32;
+    utils::transpose_chunk::<_, N>(data, size);
+    utils::transpose_blocks::<_, N>(data, size);
+
+    fft_rows(data, size);
+}
+
+pub(crate) fn ifft2d(data: &mut [Complex32], size: usize) {
+    assert!(size.is_power_of_two());
+
+    data.iter_mut().for_each(|x| *x = x.conj());
+
+    fft2d(data, size);
+
+    let scale = 1.0 / (size * size) as f32;
+
+    data.iter_mut().for_each(|x| *x = x.conj() * scale);
+}
+
+fn fft_image(data: &mut [u8], width: u32, height: u32) {
+    image::GrayImage::from_raw(width, height, data.to_vec())
+        .unwrap()
+        .save("temp0.png")
+        .unwrap();
+
+    let mut complex = data
+        .iter()
+        .map(|&x| Complex32::new((x as f32) / 255.0, 0.0))
+        .collect_vec();
+
+    fft2d(&mut complex, width as usize);
+
+    fftshift(&mut complex, width as usize);
+
+    let bytes = complex.iter().map(|x| x.re as u8).collect::<Vec<_>>();
+
+    data.copy_from_slice(&bytes);
+
+    image::GrayImage::from_raw(width, height, bytes)
+        .unwrap()
+        .save("temp1.png")
+        .unwrap();
 }
 
 
@@ -122,7 +181,7 @@ mod tests {
         buffer
     }
 
-    fn approx_eq(a: &[Complex], b: &[Complex32], eps: f32) {
+    pub fn approx_eq(a: &[Complex32], b: &[Complex32], eps: f32) {
         for (i, (x, y)) in a.iter().zip(b).enumerate() {
             assert!(
                 (x.re - y.re).abs() < eps,
@@ -133,13 +192,13 @@ mod tests {
             assert!(
                 (x.im - y.im).abs() < eps,
                 "Result {i} imaginary values differ: {:?} vs {:?}",
-                x.im(),
+                x.im,
                 y.im
             );
         }
     }
 
-    fn run_case(input: Box<[Complex]>, eps: f32) {
+    fn run_case(input: Box<[Complex32]>, eps: f32) {
         let mut mine = input.clone();
         fft_stockham(&mut mine);
 
@@ -150,7 +209,7 @@ mod tests {
 
     #[test]
     fn test_constant_one() {
-        let data = [Complex::new(1.0, 0.0); 8];
+        let data = [Complex32::ONE; 8];
 
         run_case(data.into(), EPSILON);
     }
@@ -179,11 +238,11 @@ mod tests {
     fn test_random_sizes() {
         let mut rng = rand::rng();
 
-        let mut rand_complex = || Complex::new(rng.random(), rng.random());
+        let mut rand_complex = || Complex32::new(rng.random(), rng.random());
 
         // 8
         {
-            let mut arr = [Complex::ZERO; 8];
+            let mut arr = [Complex32::ZERO; 8];
 
             arr.fill_with(&mut rand_complex);
 
@@ -192,7 +251,7 @@ mod tests {
 
         // 16
         {
-            let mut arr = [Complex::ZERO; 16];
+            let mut arr = [Complex32::ZERO; 16];
 
             arr.fill_with(&mut rand_complex);
 
@@ -202,16 +261,16 @@ mod tests {
 
     #[test]
     fn test_impulse() {
-        let mut arr = [Complex::ZERO; 8];
+        let mut arr = [Complex32::ZERO; 8];
 
-        arr[0] = Complex::new(1.0, 0.0);
+        arr[0] = Complex32::new(1.0, 0.0);
 
         run_case(arr.into(), EPSILON);
     }
 
     #[test]
     fn test_constant() {
-        let arr = [Complex::new(2.0, 1.0); 16];
+        let arr = [Complex32::new(2.0, 1.0); 16];
 
         run_case(arr.into(), EPSILON);
     }
@@ -222,11 +281,11 @@ mod tests {
 
         let freq = 5.0; // cycles over N samples
 
-        let mut input = [Complex::ZERO; N];
+        let mut input = [Complex32::ZERO; N];
 
         for i in 0..N {
             let v = (TAU * freq * i as f32 / N as f32).sin();
-            input[i] = Complex::new(v, 0.0);
+            input[i] = Complex32::new(v, 0.0);
         }
 
         run_case(input.into(), EPSILON);
@@ -237,10 +296,10 @@ mod tests {
         const N: usize = 64;
         let freq = 7.0;
 
-        let mut input = [Complex::ZERO; N];
+        let mut input = [Complex32::ZERO; N];
         for i in 0..N {
             let v = (TAU * freq * i as f32 / N as f32).cos();
-            input[i] = Complex::new(v, 0.0);
+            input[i] = Complex32::new(v, 0.0);
         }
 
         run_case(input.into(), EPSILON);
@@ -252,12 +311,12 @@ mod tests {
         let f1 = 3.0;
         let f2 = 17.0;
 
-        let mut input = [Complex::ZERO; N];
+        let mut input = [Complex32::ZERO; N];
 
         for i in 0..N {
             let v = (TAU * f1 * i as f32 / N as f32).sin()
                 + 0.5 * (TAU * f2 * i as f32 / N as f32).sin();
-            input[i] = Complex::new(v, 0.0);
+            input[i] = Complex32::new(v, 0.0);
         }
 
         run_case(input.into(), EPSILON);
@@ -267,12 +326,12 @@ mod tests {
     fn test_chirp_signal() {
         const N: usize = 128;
 
-        let mut input = [Complex::ZERO; N];
+        let mut input = [Complex32::ZERO; N];
         for i in 0..N {
             let f = 1.0 + 20.0 * (i as f32 / N as f32); // sweep from 1→21 cycles
             let v = (TAU * f * (i as f32 / N as f32)).sin();
 
-            input[i] = Complex::new(v, 0.0);
+            input[i] = Complex32::new(v, 0.0);
         }
 
         run_case(input.into(), EPSILON);
@@ -282,12 +341,12 @@ mod tests {
     fn test_even_symmetric_real() {
         const N: usize = 32;
 
-        let mut input = [Complex::ZERO; N];
+        let mut input = [Complex32::ZERO; N];
 
         for i in 0..N / 2 {
             let v = (i as f32).powi(2);
-            input[i] = Complex::new(v, 0.0);
-            input[N - i - 1] = Complex::new(v, 0.0);
+            input[i] = Complex32::new(v, 0.0);
+            input[N - i - 1] = Complex32::new(v, 0.0);
         }
 
         run_case(input.into(), EPSILON);
@@ -297,13 +356,13 @@ mod tests {
     fn test_odd_symmetric_real() {
         const N: usize = 32;
 
-        let mut input = [Complex::ZERO; N];
+        let mut input = [Complex32::ZERO; N];
 
         for i in 0..N / 2 {
             let v = (i as f32).sin();
 
-            input[i] = Complex::new(v, 0.0);
-            input[N - i - 1] = Complex::new(-v, 0.0);
+            input[i] = Complex32::new(v, 0.0);
+            input[N - i - 1] = Complex32::new(-v, 0.0);
         }
 
         run_case(input.into(), EPSILON);
@@ -313,9 +372,9 @@ mod tests {
     fn test_offset_impulse() {
         const N: usize = 64;
 
-        let mut input = [Complex::ZERO; N];
+        let mut input = [Complex32::ZERO; N];
 
-        input[7] = Complex::new(1.0, 0.0);
+        input[7] = Complex32::new(1.0, 0.0);
 
         run_case(input.into(), EPSILON);
     }

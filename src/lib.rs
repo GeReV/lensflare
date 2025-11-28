@@ -13,6 +13,7 @@ mod app;
 mod utils;
 mod ghost;
 mod fft;
+mod colors;
 
 use anyhow::*;
 use winit::event_loop::EventLoop;
