@@ -870,6 +870,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "fft2d"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1c482b46ec33684e85d0efe087784fbcea8f66287d2f9f27d6e27fe6433aeb40"
+dependencies = [
+ "rustfft",
+]
+
+[[package]]
 name = "find-msvc-tools"
 version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1399,6 +1408,7 @@ dependencies = [
  "color",
  "encase",
  "env_logger",
+ "fft2d",
  "glam",
  "image",
  "imgui",
@@ -1406,6 +1416,7 @@ dependencies = [
  "imgui-winit-support",
  "itertools 0.14.0",
  "log",
+ "num-complex",
  "pollster",
  "rand 0.9.2",
  "rayon",
