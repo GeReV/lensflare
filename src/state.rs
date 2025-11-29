@@ -1,6 +1,8 @@
+use rayon::iter::ParallelIterator;
+use rayon::iter::IndexedParallelIterator;
 use crate::arc::Arc;
 use crate::camera::{Camera, CameraController, Projection};
-use crate::ghost::{copy_texture_to_image, draw_ghost_sdf, fft_ghost};
+use crate::ghost::{copy_texture_to_image, draw_ghost_polygon, draw_ghost_sdf, fft_ghost};
 use crate::grids::Grids;
 use crate::hot_reload::{HotReloadResult, HotReloadShader};
 use crate::lenses::{Lens, LensInterface};
@@ -14,14 +16,14 @@ use crate::uniforms::{
 use crate::vertex::{ColoredVertex, Vertex};
 use encase::{StorageBuffer, UniformBuffer};
 use glam::{vec3, vec4, Vec3, Vec3Swizzles, Vec4};
-use image::GenericImageView;
+use image::{GenericImageView, Pixel};
 use imgui::{Condition, FontSource, MouseCursor};
 use imgui_wgpu::{Renderer, RendererConfig};
 use imgui_winit_support::WinitPlatform;
 use itertools::{Itertools, MinMaxResult};
 use std::collections::HashMap;
 use std::f32::consts::PI;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 use wesl::{StandardResolver, Wesl};
 use wgpu::util::{BufferInitDescriptor, DeviceExt, TextureDataOrder};
 use wgpu::wgt::{SamplerDescriptor, TextureDescriptor, TextureViewDescriptor};
@@ -411,25 +413,38 @@ impl State {
             &mut compiler,
             512,
             8,
-            0.75,
-            -3.0_f32.to_radians(),
+            0.9,
+            -7.5_f32.to_radians(),
         )?;
 
-        let ghost_image = copy_texture_to_image(&device, &queue, &ghost_texture);
-        ghost_image.save("ghost_aperture.png")?;
+        let aperture_image = copy_texture_to_image(&device, &queue, &ghost_texture);
+        aperture_image.save("ghost_aperture.png")?;
 
         {
             // Pixel size in meters
             let aperture_size = 14.0 * 1e-3;
-            let dx = aperture_size / ghost_image.width() as f32;
-            let dx = 10e-6;
+            let dx = aperture_size / aperture_image.width() as f32;
+            let dx = 3.7e-6;
 
             // Focal length in meters
-            let z = 20e-3;
+            let z = 10e-3;
 
-            let wavelengths_nm = (380..800).step_by(5).map(|wavelength| wavelength as f32);
+            let wavelength_step = 5;
+            let wavelengths_nm = (380..800).step_by(wavelength_step).map(|wavelength| wavelength as f32);
 
-            let ghost_image = fft_ghost(ghost_image.into_luma8(), dx, z, wavelengths_nm);
+            let aperture_image = aperture_image.into_luma8();
+
+            let mut ghost_image = fft_ghost(&aperture_image, dx, z, wavelengths_nm);
+
+            // Multiply with aperture mask.
+            ghost_image.par_pixels_mut().zip(aperture_image.par_pixels()).for_each(|(pixel, aperture_pixel)| {
+                let v = aperture_pixel[0] as f32 / 255.0;
+
+                pixel.apply(|c| {
+                    (c as f32 * v) as u8
+                });
+            });
+
             ghost_image.save("ghost.png")?;
         }
 

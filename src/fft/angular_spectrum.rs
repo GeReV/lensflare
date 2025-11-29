@@ -38,8 +38,8 @@ pub(crate) fn generate_frequency_grid(
     frequency_grid
 }
 
-// pub(crate) fn generate_frequency_grid(size: usize, delta: f64, z: f64, wavelength: f64) -> Vec<Complex64> {
-//     use std::f64::consts::PI;
+// pub(crate) fn generate_frequency_grid(size: usize, delta: f32, z: f32, wavelength: f32) -> Vec<Complex32> {
+//     use std::f32::consts::PI;
 //
 //     let pw = size * 2;
 //
@@ -47,24 +47,24 @@ pub(crate) fn generate_frequency_grid(
 //
 //     let mut frequency_grid = Vec::with_capacity(pw * pw);
 //
-//     let step = 1.0 / (delta * size as f64);
+//     let step = 1.0 / (delta * size as f32);
 //
 //     for u in 0..pw {
-//         let kx = (u as isize - size as isize) as f64 * step;
+//         let kx = (u as isize - size as isize) as f32 * step;
 //         let w_x = 2.0 * z * step;
 //         let halfband_x = 1.0 / ((w_x * w_x + 1.0).sqrt() * wavelength);
 //
 //         for v in 0..pw {
-//             let ky = (v as isize - size as isize) as f64 * step;
+//             let ky = (v as isize - size as isize) as f32 * step;
 //             let kz2 = k - (kx * kx + ky * ky);
 //
 //             let w_y = 2.0 * z * step;
 //             let halfband_y = 1.0 / ((w_y * w_y + 1.0).sqrt() * wavelength);
 //
 //             let value = if kz2 > 0.0 && kx.abs() < halfband_x && ky.abs() < halfband_y {
-//                 Complex64::cis(2.0 * PI * kz2.sqrt() * z)
+//                 Complex32::cis(2.0 * PI * kz2.sqrt() * z)
 //             } else {
-//                 Complex64::ZERO
+//                 Complex32::ZERO
 //             };
 //
 //             frequency_grid.push(value);
@@ -128,3 +128,4 @@ pub(crate) fn angular_spectrum(
             });
     }
 }
+

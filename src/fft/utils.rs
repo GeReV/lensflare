@@ -1,8 +1,11 @@
 use cgmath::num_traits::NumAssign;
+use image::{GrayImage, Luma};
 use num_complex::{Complex, Complex32};
-use rustfft::num_traits::Float;
 
-pub(crate) fn elementwise_multiply<T: Clone + NumAssign>(data: &mut [Complex<T>], kernel: &[Complex<T>]) {
+pub(crate) fn elementwise_multiply<T: Clone + NumAssign>(
+    data: &mut [Complex<T>],
+    kernel: &[Complex<T>],
+) {
     debug_assert_eq!(data.len(), kernel.len());
 
     data.iter_mut().zip(kernel).for_each(|(x, k)| {
@@ -29,7 +32,10 @@ pub(crate) fn transpose_chunk<T, const N: usize>(buffer: &mut [T], buffer_width:
     }
 }
 
-pub(crate) fn transpose_blocks<T: Copy + Default, const N: usize>(buffer: &mut [T], buffer_width: usize) {
+pub(crate) fn transpose_blocks<T: Copy + Default, const N: usize>(
+    buffer: &mut [T],
+    buffer_width: usize,
+) {
     let block_count = buffer_width / N;
 
     for block_y in 0..block_count {
@@ -60,4 +66,30 @@ pub(crate) fn print_complex_slice(c: &[Complex32]) {
         print!("{x:.3}; ");
     }
     println!();
+}
+
+pub(crate) fn save_complex_data_to_image(data: &[Complex32], size: u32, name: impl Into<String>) {
+    let real = GrayImage::from_par_fn(size, size, |x, y| {
+        let value = data[(y * size + x) as usize];
+
+        Luma([value.re as u8])
+    });
+
+    let imaginary = GrayImage::from_par_fn(size, size, |x, y| {
+        let value = data[(y * size + x) as usize];
+
+        Luma([value.im as u8])
+    });
+
+    let combined = GrayImage::from_par_fn(size, size, |x, y| {
+        let value = data[(y * size + x) as usize];
+
+        Luma([value.norm() as u8])
+    });
+
+    let name = name.into();
+
+    real.save(format!("{}_re.png", name)).unwrap();
+    imaginary.save(format!("{}_im.png", name)).unwrap();
+    combined.save(format!("{}.png", name)).unwrap();
 }

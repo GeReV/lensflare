@@ -339,7 +339,7 @@ pub fn copy_texture_to_image(device: &Device, queue: &Queue, texture: &Texture) 
             buffer: &output_buffer,
             layout: wgpu::TexelCopyBufferLayout {
                 offset: 0,
-                bytes_per_row: Some(texture_size.width * bpp as u32),
+                bytes_per_row: Some(texture_size.width * bpp),
                 rows_per_image: Some(texture_size.height),
             },
         },
@@ -379,7 +379,7 @@ pub fn copy_texture_to_image(device: &Device, queue: &Queue, texture: &Texture) 
     }
 }
 
-pub fn fft_ghost(image: GrayImage, delta: f32, z: f32, wavelengths: impl IntoIterator<Item = f32>) -> RgbaImage {
+pub fn fft_ghost(image: &GrayImage, delta: f32, z: f32, wavelengths: impl IntoIterator<Item = f32>) -> RgbaImage {
     let (width, height) = image.dimensions();
 
     let mut img = Rgba32FImage::new(width, height);

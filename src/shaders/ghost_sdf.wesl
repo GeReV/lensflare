@@ -58,5 +58,5 @@ fn fs_main(@location(0) uv: vec2f) -> @location(0) vec4f {
 //    return vec4f(1 - smoothstep(-0.02, 0.0, a));
 
     // Outside border
-    return vec4f(1 - smoothstep(0.02, 0.025, a));
+    return vec4f(1 - smoothstep(0.02, 0.03, a));
 }

@@ -1,42 +1,27 @@
-use std::f32::consts::TAU;
+use crate::fft::utils::save_complex_data_to_image;
+use image::GrayImage;
 use itertools::Itertools;
-use num_complex::{Complex32, Complex64};
+use num_complex::Complex32;
 use rayon::prelude::*;
+use std::f32::consts::TAU;
 
-mod utils;
-pub mod frft;
-pub mod fresnel;
 pub mod angular_spectrum;
-
-fn calculate_twiddles(n: usize) -> Box<[Complex32]> {
-    let mut result = Vec::with_capacity(n);
-
-    for k in 0..n {
-        result.push(Complex32::cis(-TAU * k as f32 / n as f32));
-    }
-
-    result.into_boxed_slice()
-}
+pub mod fresnel;
+pub mod frft;
+mod utils;
 
 pub(crate) fn fftshift<T: Send>(data: &mut [T], width: usize) {
-    // Swap bottom rows with top rows.
-    let (a, b) = data.split_at_mut(data.len() / 2);
-    a.swap_with_slice(b);
+    debug_assert_eq!(data.len(), width * width);
 
+    data.rotate_right(data.len() / 2);
+
+    // Swap each row's halves.
     data.par_chunks_exact_mut(width).for_each(|row_data| {
-        let (a, b) = row_data.split_at_mut(width / 2);
-
-        a.swap_with_slice(b);
+        row_data.rotate_left(width / 2);
     });
 }
 
-fn fft_step_stockham(
-    data: &[Complex32],
-    twiddles: &[Complex32],
-    x: usize,
-    n: usize,
-    n_s: usize,
-) -> Complex32 {
+fn fft_step_stockham(data: &[Complex32], x: usize, n: usize, n_s: usize) -> Complex32 {
     let base = x / n_s * (n_s / 2);
     let offset = x % (n_s / 2);
 
@@ -45,9 +30,6 @@ fn fft_step_stockham(
 
     let a = data[idx0];
     let b = data[idx1];
-
-    let e_idx = x * (n / n_s) % n;
-    let e = twiddles[e_idx];
 
     let e = Complex32::cis(-TAU * x as f32 / n_s as f32);
 
@@ -59,8 +41,6 @@ pub fn fft_stockham(data: &mut [Complex32]) {
 
     assert!(len.is_power_of_two());
 
-    let twiddles = calculate_twiddles(len);
-
     // TODO: Any way to avoid this and the later copy?
     let mut a = Vec::from(&*data);
     let mut b = vec![Complex32::ZERO; len];
@@ -69,13 +49,54 @@ pub fn fft_stockham(data: &mut [Complex32]) {
         let n_s = 1 << (iter + 1);
 
         for x in 0..len {
-            b[x] = fft_step_stockham(&a, &twiddles, x, len, n_s);
+            b[x] = fft_step_stockham(&a, x, len, n_s);
         }
 
         std::mem::swap(&mut a, &mut b);
     }
 
     data.copy_from_slice(&a);
+}
+
+pub fn fft_stockham_naive(data: &mut [Complex32]) {
+    let len = data.len();
+
+    assert!(len.is_power_of_two());
+
+    let mut a = Vec::from(&*data);
+
+    fn fft(v: &mut [Complex32], off: usize, n: usize) {
+        if n <= 1 {
+            return;
+        }
+
+        let half = n / 2;
+        let mid = off + half;
+
+        for i in 0..half {
+            let x = v[off + i];
+            let y = v[mid + i];
+
+            v[off + i] = x + y;
+            v[mid + i] = (x - y) * Complex32::cis(-TAU * i as f32 / n as f32);
+        }
+
+        fft(v, off, half);
+        fft(v, mid, half);
+    }
+
+    fft(&mut a, 0, len);
+
+    data.copy_from_slice(&bit_reverse_permutation(&a));
+}
+
+fn bit_reverse_permutation(data: &[Complex32]) -> Vec<Complex32> {
+    let len = data.len();
+    assert!(len.is_power_of_two());
+
+    let s = 1 + data.len().leading_zeros();
+
+    (0..len).map(|i| data[i.reverse_bits() >> s]).collect()
 }
 
 fn fft_rows(data: &mut [Complex32], width: usize) {
@@ -92,6 +113,8 @@ pub(crate) fn fft2d(data: &mut [Complex32], size: usize) {
     utils::transpose_blocks::<_, N>(data, size);
 
     fft_rows(data, size);
+
+    fftshift(data, size);
 }
 
 pub(crate) fn ifft2d(data: &mut [Complex32], size: usize) {
@@ -99,7 +122,13 @@ pub(crate) fn ifft2d(data: &mut [Complex32], size: usize) {
 
     data.iter_mut().for_each(|x| *x = x.conj());
 
-    fft2d(data, size);
+    fft_rows(data, size);
+
+    const N: usize = 32;
+    utils::transpose_chunk::<_, N>(data, size);
+    utils::transpose_blocks::<_, N>(data, size);
+
+    fft_rows(data, size);
 
     let scale = 1.0 / (size * size) as f32;
 
@@ -107,7 +136,7 @@ pub(crate) fn ifft2d(data: &mut [Complex32], size: usize) {
 }
 
 fn fft_image(data: &mut [u8], width: u32, height: u32) {
-    image::GrayImage::from_raw(width, height, data.to_vec())
+    GrayImage::from_raw(width, height, data.to_vec())
         .unwrap()
         .save("temp0.png")
         .unwrap();
@@ -125,44 +154,11 @@ fn fft_image(data: &mut [u8], width: u32, height: u32) {
 
     data.copy_from_slice(&bytes);
 
-    image::GrayImage::from_raw(width, height, bytes)
+    GrayImage::from_raw(width, height, bytes)
         .unwrap()
         .save("temp1.png")
         .unwrap();
 }
-
-
-// fn fft_real<const N: usize>(data: &[f32; N]) -> Box<[f32; N]> {
-//     debug_assert!(N.is_power_of_two());
-//
-//     let twiddles = calculate_twiddles(N);
-//
-//     let (mut a, mut b) = (Box::new([Complex::ZERO; N]), Box::new([Complex::ZERO; N]));
-//
-//     for (a, &x) in a.iter_mut().zip(data.iter()) {
-//         a.re = x;
-//     }
-//
-//     for iter in 0..N.ilog2() {
-//         let n_s = 1 << (iter + 1);
-//         let half = n_s / 2;
-//         let num_blocks = N / n_s;
-//
-//         for block in 0..num_blocks {
-//             let out_base = block * half;
-//
-//             // only compute the first half of the output butterflies
-//             for k in 0..half {
-//                 let x = out_base + k; // same x indexing your Stockham mapper expects
-//                 b[x] = fft_step_stockham(&*a, &twiddles, x, N, n_s);
-//             }
-//         }
-//
-//         std::mem::swap(&mut a, &mut b);
-//     }
-//
-//     a.map(|x| x.re).into()
-// }
 
 #[cfg(test)]
 mod tests {
@@ -202,7 +198,12 @@ mod tests {
         let mut mine = input.clone();
         fft_stockham(&mut mine);
 
-        let reference = rustfft_reference(&input.iter().map(|x| Complex32::new(x.re, x.im)).collect::<Vec<_>>());
+        let reference = rustfft_reference(
+            &input
+                .iter()
+                .map(|x| Complex32::new(x.re, x.im))
+                .collect::<Vec<_>>(),
+        );
 
         approx_eq(&mine, &reference, eps);
     }
