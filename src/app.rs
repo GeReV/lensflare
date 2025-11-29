@@ -1,4 +1,3 @@
-use std::f32::consts::PI;
 use std::time::Instant;
 use winit::application::ApplicationHandler;
 use winit::event_loop::ActiveEventLoop;
@@ -7,7 +6,7 @@ use winit::dpi::LogicalSize;
 use winit::event::{DeviceEvent, DeviceId, ElementState, Event, KeyEvent, WindowEvent};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use wgpu::SurfaceError;
-use glam::{vec4, Vec2};
+use glam::Vec2;
 use crate::state::State;
 
 pub struct App {
@@ -96,10 +95,10 @@ impl ApplicationHandler<State> for App {
             }
             WindowEvent::MouseWheel { delta, .. } => {
                 if !state.imgui.context.io().want_capture_mouse {
-                    state.handle_mouse_scroll(&delta);
+                    state.handle_mouse_scroll(delta);
                 }
             }
-            WindowEvent::CursorMoved { position, .. } => {
+            WindowEvent::CursorMoved { .. } => {
                 // Mouse cursor position handling - not needed for camera control
             }
             WindowEvent::KeyboardInput {
