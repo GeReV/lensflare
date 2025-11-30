@@ -1,11 +1,10 @@
-use std::f32::consts::PI;
-use rayon::iter::{IndexedParallelIterator, IntoParallelIterator, IntoParallelRefMutIterator, ParallelIterator};
+use crate::fft::cpu::fft_stockham;
+use crate::fft::utils::{elementwise_multiply, transpose_blocks, transpose_chunk};
 use itertools::Itertools;
 use num_complex::{Complex32, ComplexFloat};
+use rayon::iter::{IndexedParallelIterator, IntoParallelIterator, IntoParallelRefMutIterator, ParallelIterator};
 use rayon::prelude::ParallelSliceMut;
-use crate::fft::fft_stockham;
-use crate::fft::utils::{elementwise_multiply, print_complex_slice, transpose_blocks, transpose_chunk};
-
+use std::f32::consts::PI;
 
 
 fn chirp_coefficient(a: f32, k: isize, n: isize) -> Complex32 {
@@ -141,8 +140,8 @@ pub fn frft_image(data: &mut [u8], width: u32, height: u32, padding_factor: usiz
 
 #[cfg(test)]
 mod tests {
-    use crate::fft::tests::approx_eq;
     use super::*;
+    use crate::fft::cpu::tests::approx_eq;
 
     #[test]
     fn test_chirp_coefficients() {
@@ -177,6 +176,7 @@ mod tests {
             fft_stockham(&mut expected);
 
             let c = Complex32::ONE;
+
             approx_eq(&expected, &[c, -c, c, -c, c, -c, c, -c], 1e-3);
         }
 

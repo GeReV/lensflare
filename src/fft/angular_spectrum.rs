@@ -1,7 +1,7 @@
 use crate::fft::utils::elementwise_multiply;
-use crate::fft::{fft2d, ifft2d};
 use num_complex::{Complex, Complex32};
 use rayon::prelude::*;
+use crate::fft::cpu::{fft2d, ifft2d};
 
 pub(crate) fn generate_frequency_grid(
     size: usize,

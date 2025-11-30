@@ -1,8 +1,8 @@
-use crate::fft::fft_stockham;
 use crate::fft::frft::frft_rows;
 use crate::fft::utils::{transpose_blocks, transpose_chunk};
 use num_complex::Complex32;
 use std::f32::consts::PI;
+use crate::fft::cpu::fft_stockham;
 
 pub fn fresnel_diffraction_image(
     data: &mut [Complex32],
