@@ -1,7 +1,15 @@
+use crate::fft::cpu::{fft2d, ifft2d};
 use crate::fft::utils::elementwise_multiply;
+use crate::fft::wgpu::{ComputeFftPipeline, GenerateFrequenciesPipeline, MultiplyComplexPipeline};
+use glam::UVec2;
 use num_complex::{Complex, Complex32};
 use rayon::prelude::*;
-use crate::fft::cpu::{fft2d, ifft2d};
+use wesl::{StandardResolver, Wesl};
+use wgpu::wgt::TextureDescriptor;
+use wgpu::{
+    Buffer, CommandEncoder, Device, Extent3d, Texture, TextureDimension, TextureFormat,
+    TextureUsages,
+};
 
 pub(crate) fn generate_frequency_grid(
     size: usize,
@@ -11,17 +19,16 @@ pub(crate) fn generate_frequency_grid(
 ) -> Vec<Complex32> {
     use std::f32::consts::PI;
 
-    let pw = size * 2;
     let k = 2.0 * PI / wavelength;
 
-    let mut frequency_grid = Vec::with_capacity(pw * pw);
+    let mut frequency_grid = Vec::with_capacity(size * size);
 
-    for u in 0..pw {
-        let fu = (u as isize - size as isize) as f32 / (delta * pw as f32);
+    for u in 0..size {
+        let fu = (u as isize - size as isize) as f32 / (delta * size as f32);
         let kx = 2.0 * PI * fu;
 
-        for v in 0..pw {
-            let fv = (v as isize - size as isize) as f32 / (delta * pw as f32);
+        for v in 0..size {
+            let fv = (v as isize - size as isize) as f32 / (delta * size as f32);
             let ky = 2.0 * PI * fv;
             let kz2 = k * k - (kx * kx + ky * ky);
 
@@ -74,7 +81,6 @@ pub(crate) fn generate_frequency_grid(
 //     frequency_grid
 // }
 
-// TODO: Does changing the copying/cropping code result in better results?
 pub(crate) fn angular_spectrum(
     data: &mut [Complex32],
     size: usize,
@@ -128,4 +134,3 @@ pub(crate) fn angular_spectrum(
             });
     }
 }
-

@@ -1,8 +1,6 @@
-use rayon::iter::ParallelIterator;
-use rayon::iter::IndexedParallelIterator;
 use crate::arc::Arc;
 use crate::camera::{Camera, CameraController, Projection};
-use crate::ghost::{copy_texture_to_image, draw_ghost_polygon, draw_ghost_sdf, fft_ghost};
+use crate::ghost::{draw_ghost_sdf, fft_ghost_gpu};
 use crate::grids::Grids;
 use crate::hot_reload::{HotReloadResult, HotReloadShader};
 use crate::lenses::{Lens, LensInterface};
@@ -16,31 +14,18 @@ use crate::uniforms::{
 use crate::vertex::{ColoredVertex, Vertex};
 use encase::{StorageBuffer, UniformBuffer};
 use glam::{vec3, vec4, Vec3, Vec3Swizzles, Vec4};
-use image::{GenericImageView, Pixel};
 use imgui::{Condition, FontSource, MouseCursor};
 use imgui_wgpu::{Renderer, RendererConfig};
 use imgui_winit_support::WinitPlatform;
 use itertools::{Itertools, MinMaxResult};
 use std::collections::HashMap;
 use std::f32::consts::PI;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant};
+use image::GrayImage;
 use wesl::{StandardResolver, Wesl};
-use wgpu::util::{BufferInitDescriptor, DeviceExt, TextureDataOrder};
+use wgpu::util::{BufferInitDescriptor, DeviceExt};
 use wgpu::wgt::{SamplerDescriptor, TextureDescriptor, TextureViewDescriptor};
-use wgpu::{
-    AddressMode, Backends, BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayout,
-    BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingResource, BindingType, BlendComponent,
-    BlendFactor, BlendOperation, BlendState, Buffer, BufferAddress, BufferBindingType,
-    BufferDescriptor, BufferUsages, Color, ColorTargetState, ColorWrites, CommandEncoderDescriptor,
-    Device, DeviceDescriptor, Extent3d, Face, Features, FilterMode, FragmentState, FrontFace,
-    IndexFormat, Instance, InstanceDescriptor, Label, Limits, LoadOp, MultisampleState, Operations,
-    PipelineCompilationOptions, PipelineLayoutDescriptor, PolygonMode, PowerPreference,
-    PresentMode, PrimitiveState, PrimitiveTopology, Queue, RenderPass, RenderPassColorAttachment,
-    RenderPassDescriptor, RenderPipeline, RenderPipelineDescriptor, RequestAdapterOptions,
-    SamplerBindingType, ShaderModule, ShaderStages, StoreOp, Surface, SurfaceConfiguration,
-    Texture, TextureDimension, TextureFormat, TextureSampleType, TextureUsages,
-    TextureViewDimension, Trace, VertexState,
-};
+use wgpu::{AddressMode, Backends, BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayout, BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingResource, BindingType, BlendComponent, BlendFactor, BlendOperation, BlendState, Buffer, BufferAddress, BufferBindingType, BufferDescriptor, BufferUsages, Color, ColorTargetState, ColorWrites, CommandEncoderDescriptor, Device, DeviceDescriptor, Extent3d, Face, Features, FilterMode, FragmentState, FrontFace, IndexFormat, Instance, InstanceDescriptor, Label, Limits, LoadOp, MultisampleState, Operations, PipelineCompilationOptions, PipelineLayoutDescriptor, PolygonMode, PowerPreference, PresentMode, PrimitiveState, PrimitiveTopology, Queue, RenderPass, RenderPassColorAttachment, RenderPassDescriptor, RenderPipeline, RenderPipelineDescriptor, RequestAdapterOptions, SamplerBindingType, ShaderModule, ShaderStages, StoreOp, Surface, SurfaceConfiguration, Texture, TextureDimension, TextureFormat, TextureSampleType, TextureUsages, TextureViewDimension, Trace, VertexState};
 use winit::event::{MouseButton, MouseScrollDelta};
 use winit::event_loop::ActiveEventLoop;
 use winit::keyboard::KeyCode;
@@ -136,6 +121,9 @@ pub struct State {
 
     debug_mode: bool,
     draw_axes: bool,
+    pub aperture_texture: Texture,
+
+    frame: u64
 }
 
 const DEBUG_RAY_COUNT: isize = 48 + 1;
@@ -162,8 +150,9 @@ impl State {
         let (device, queue) = adapter
             .request_device(&DeviceDescriptor {
                 label: None,
-                required_features: Features::POLYGON_MODE_LINE,
-                required_limits: Limits::default(),
+                required_features: Features::POLYGON_MODE_LINE | Features::PUSH_CONSTANTS,
+                required_limits: adapter.limits(),
+                experimental_features: Default::default(),
                 memory_hints: Default::default(),
                 trace: Trace::Off,
             })
@@ -407,68 +396,42 @@ impl State {
             )?,
         });
 
-        let ghost_texture = draw_ghost_sdf(
+        let aperture_texture = draw_ghost_sdf(
             &device,
             &queue,
             &mut compiler,
-            512,
+            1024,
             8,
             0.9,
             -7.5_f32.to_radians(),
         )?;
 
-        let aperture_image = copy_texture_to_image(&device, &queue, &ghost_texture);
-        aperture_image.save("ghost_aperture.png")?;
+        // let ghost_texture = generate_fft_ghost_texture_cpu(&device, &queue, &aperture_texture)?;
 
-        {
+        let ghost_texture = {
             // Pixel size in meters
             let aperture_size = 14.0 * 1e-3;
-            let dx = aperture_size / aperture_image.width() as f32;
+            let dx = aperture_size / aperture_texture.width() as f32;
             let dx = 3.7e-6;
 
             // Focal length in meters
             let z = 10e-3;
 
             let wavelength_step = 5;
-            let wavelengths_nm = (380..800).step_by(wavelength_step).map(|wavelength| wavelength as f32);
+            let wavelengths_nm = (380..800)
+                .step_by(wavelength_step)
+                .map(|wavelength| wavelength as f32);
 
-            let aperture_image = aperture_image.into_luma8();
-
-            let mut ghost_image = fft_ghost(&aperture_image, dx, z, wavelengths_nm);
-
-            // Multiply with aperture mask.
-            ghost_image.par_pixels_mut().zip(aperture_image.par_pixels()).for_each(|(pixel, aperture_pixel)| {
-                let v = aperture_pixel[0] as f32 / 255.0;
-
-                pixel.apply(|c| {
-                    (c as f32 * v) as u8
-                });
-            });
-
-            ghost_image.save("ghost.png")?;
-        }
-
-        let ghost_image = image::open("ghost.png")?;
-
-        let ghost_texture = device.create_texture_with_data(
-            &queue,
-            &TextureDescriptor {
-                label: Some("Ghost Texture"),
-                size: Extent3d {
-                    width: ghost_image.width(),
-                    height: ghost_image.height(),
-                    depth_or_array_layers: 1,
-                },
-                dimension: TextureDimension::D2,
-                format: TextureFormat::Rgba8Unorm,
-                usage: TextureUsages::TEXTURE_BINDING,
-                view_formats: &[],
-                mip_level_count: 1,
-                sample_count: 1,
-            },
-            TextureDataOrder::LayerMajor,
-            ghost_image.as_bytes(),
-        );
+            fft_ghost_gpu(
+                &device,
+                &queue,
+                &mut compiler,
+                &aperture_texture,
+                dx,
+                z,
+                wavelengths_nm,
+            )
+        }?;
 
         let ghost_texture_sampler = device.create_sampler(&SamplerDescriptor {
             label: Some("Ghost Texture Sampler"),
@@ -738,6 +701,7 @@ impl State {
             grids_vertex_buffer,
             grids_index_buffer,
 
+            aperture_texture,
             ghost_texture,
 
             static_lines_vertices,
@@ -756,6 +720,8 @@ impl State {
 
             debug_mode: false,
             draw_axes: false,
+
+            frame: 0,
         })
     }
 
@@ -776,7 +742,7 @@ impl State {
         );
         let camera_controller = CameraController::new(1.0, 1.75);
 
-        let camera_uniform = CameraUniform::from_camera_and_projection(&camera, &projection);
+        let camera_uniform = CameraUniform::from_camera_and_projection(&camera, projection);
 
         let camera_buffer = device.create_buffer_init(&BufferInitDescriptor {
             label: Some("Camera Buffer"),
@@ -1490,6 +1456,7 @@ impl State {
                 label: Some("Lens Flare Pass"),
                 color_attachments: &[Some(RenderPassColorAttachment {
                     view: &view,
+                    depth_slice: None,
                     resolve_target: None,
                     ops: Operations {
                         load: LoadOp::Clear(Color::BLACK),
@@ -1563,6 +1530,7 @@ impl State {
                 label: Some("Lines Pass"),
                 color_attachments: &[Some(RenderPassColorAttachment {
                     view: &view,
+                    depth_slice: None,
                     resolve_target: None,
                     ops: Operations {
                         load: LoadOp::Load,
@@ -1596,6 +1564,7 @@ impl State {
                 label: Some("Debug Pass"),
                 color_attachments: &[Some(RenderPassColorAttachment {
                     view: &view,
+                    depth_slice: None,
                     resolve_target: None,
                     ops: Operations {
                         load: LoadOp::Clear(Color::BLACK),
@@ -1627,6 +1596,7 @@ impl State {
                 label: Some("Fullscreen Pass"),
                 color_attachments: &[Some(RenderPassColorAttachment {
                     view: &output_view,
+                    depth_slice: None,
                     resolve_target: None,
                     ops: Operations {
                         load: LoadOp::Clear(Color::BLACK),
@@ -1651,6 +1621,7 @@ impl State {
                     view: &output
                         .texture
                         .create_view(&TextureViewDescriptor::default()),
+                    depth_slice: None,
                     resolve_target: None,
                     ops: Operations {
                         load: LoadOp::Load,
@@ -1667,6 +1638,30 @@ impl State {
         self.queue.submit(Some(encoder.finish()));
 
         output.present();
+
+        if self.frame == 10 {
+            let dx = 3.7e-6;
+
+            // Focal length in meters
+            let z = 10e-3;
+
+            let wavelength_step = 5;
+            let wavelengths_nm = (380..800)
+                .step_by(wavelength_step)
+                .map(|wavelength| wavelength as f32);
+
+            fft_ghost_gpu(
+                &self.device,
+                &self.queue,
+                &mut self.compiler,
+                &self.aperture_texture,
+                dx,
+                z,
+                wavelengths_nm,
+            )?;
+        }
+
+        self.frame = self.frame.wrapping_add(1);
 
         anyhow::Ok(())
     }
@@ -1845,3 +1840,58 @@ impl State {
         anyhow::Ok(())
     }
 }
+
+// fn generate_fft_ghost_texture_cpu(device: &Device, queue: &Queue, aperture_texture: &Texture) -> anyhow::Result<Texture> {
+//         let aperture_image = copy_texture_to_image(&device, &queue, &aperture_texture);
+//         aperture_image.save("ghost_aperture.png")?;
+//
+//         // Pixel size in meters
+//         let aperture_size = 14.0 * 1e-3;
+//         let dx = aperture_size / aperture_image.width() as f32;
+//         let dx = 3.7e-6;
+//
+//         // Focal length in meters
+//         let z = 10e-3;
+//
+//         let wavelength_step = 5;
+//         let wavelengths_nm = (380..800).step_by(wavelength_step).map(|wavelength| wavelength as f32);
+//
+//         let aperture_image = aperture_image.into_luma8();
+//
+//         let mut ghost_image = fft_ghost(&ghost_texture, dx, z, wavelengths_nm);
+//
+//         // Multiply with aperture mask.
+//         ghost_image.par_pixels_mut().zip(aperture_image.par_pixels()).for_each(|(pixel, aperture_pixel)| {
+//             let v = aperture_pixel[0] as f32 / 255.0;
+//
+//             pixel.apply(|c| {
+//                 (c as f32 * v) as u8
+//             });
+//         });
+//
+//         ghost_image.save("ghost.png")?;
+//
+//     let ghost_image = image::open("ghost.png")?;
+//
+//     let ghost_texture = device.create_texture_with_data(
+//         &queue,
+//         &TextureDescriptor {
+//             label: Some("Ghost Texture"),
+//             size: Extent3d {
+//                 width: ghost_image.width(),
+//                 height: ghost_image.height(),
+//                 depth_or_array_layers: 1,
+//             },
+//             dimension: TextureDimension::D2,
+//             format: TextureFormat::Rgba8Unorm,
+//             usage: TextureUsages::TEXTURE_BINDING,
+//             view_formats: &[],
+//             mip_level_count: 1,
+//             sample_count: 1,
+//         },
+//         TextureDataOrder::LayerMajor,
+//         ghost_image.as_bytes(),
+//     );
+//
+//     Ok(ghost_texture)
+// }

@@ -3,20 +3,15 @@ use std::hash::Hash;
 use std::marker::PhantomData;
 
 #[derive(Copy, Clone, Eq, Hash, PartialEq)]
-pub struct Id<T>(pub(super) usize, PhantomData<T>)
-where
-    T: Hash + Eq;
+pub struct Id<T>(pub(super) usize, PhantomData<T>);
 
 #[derive(Default)]
-pub struct Registry<T: Hash + Eq> {
+pub struct Registry<T> {
     next_id: usize,
     items: HashMap<usize, T>,
 }
 
-impl<T> Registry<T>
-where
-    T: Hash + Eq,
-{
+impl<T> Registry<T> {
     pub fn new() -> Self {
         Self {
             next_id: 0,

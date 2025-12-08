@@ -3,7 +3,7 @@ use anyhow::Error;
 use wesl::{StandardResolver, Wesl};
 use wgpu::{Device, Label, ShaderModule, ShaderModuleDescriptor, ShaderSource};
 
-pub fn create_shader<'a>(
+pub fn create_shader(
     device: &Device,
     compiler: &mut Wesl<StandardResolver>,
     label: Label,

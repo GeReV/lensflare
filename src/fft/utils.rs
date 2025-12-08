@@ -1,6 +1,8 @@
 use cgmath::num_traits::NumAssign;
-use image::{GrayImage, Luma};
+use image::{DynamicImage, GrayImage, Luma, RgbaImage};
+use itertools::Itertools;
 use num_complex::{Complex, Complex32};
+use wgpu::{Buffer, BufferAddress, BufferDescriptor, BufferUsages, CommandEncoderDescriptor, Device, Queue, Texture, TextureFormat};
 
 pub(crate) fn elementwise_multiply<T: Clone + NumAssign>(
     data: &mut [Complex<T>],
@@ -68,23 +70,100 @@ pub(crate) fn print_complex_slice(c: &[Complex32]) {
     println!();
 }
 
+pub fn copy_buffer_from_gpu(device: &Device, buffer: &Buffer) -> Vec<u8> {
+    let mut buffer_data = Vec::with_capacity(buffer.size() as usize);
+
+    let buffer_slice = buffer.slice(..);
+
+    let (sender, receiver) = std::sync::mpsc::channel();
+
+    buffer_slice.map_async(wgpu::MapMode::Read, move |r| sender.send(r).unwrap());
+
+    device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+
+    receiver.recv().unwrap().unwrap();
+
+    {
+        let view = buffer_slice.get_mapped_range();
+        buffer_data.extend_from_slice(&view[..]);
+    }
+
+    buffer.unmap();
+
+    buffer_data
+}
+
+pub fn copy_texture_to_image(device: &Device, queue: &Queue, texture: &Texture) -> DynamicImage {
+    let texture_size = texture.size();
+
+    let bpp = texture.format().target_pixel_byte_cost().unwrap_or(1);
+
+    let output_buffer_size = (texture_size.width * texture_size.height * bpp) as BufferAddress;
+    let output_buffer = device.create_buffer(&BufferDescriptor {
+        size: output_buffer_size,
+        usage: BufferUsages::COPY_DST | BufferUsages::MAP_READ,
+        label: None,
+        mapped_at_creation: false,
+    });
+
+    let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor { label: None });
+    encoder.copy_texture_to_buffer(
+        wgpu::TexelCopyTextureInfo {
+            aspect: wgpu::TextureAspect::All,
+            texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+        },
+        wgpu::TexelCopyBufferInfo {
+            buffer: &output_buffer,
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(texture_size.width * bpp),
+                rows_per_image: Some(texture_size.height),
+            },
+        },
+        texture_size,
+    );
+
+    queue.submit(Some(encoder.finish()));
+
+    let texture_data = copy_buffer_from_gpu(device, &output_buffer);
+
+    match texture.format() {
+        TextureFormat::R8Unorm
+        | TextureFormat::R8Snorm
+        | TextureFormat::R8Uint
+        | TextureFormat::R8Sint => DynamicImage::ImageLuma8(
+            GrayImage::from_raw(texture_size.width, texture_size.height, texture_data).unwrap(),
+        ),
+        TextureFormat::Rgba8UnormSrgb
+        | TextureFormat::Rgba8Unorm
+        | TextureFormat::Rgba8Uint
+        | TextureFormat::Rgba8Sint
+        | TextureFormat::Rgba8Snorm => DynamicImage::ImageRgba8(
+            RgbaImage::from_raw(texture_size.width, texture_size.height, texture_data).unwrap(),
+        ),
+        _ => unimplemented!("Unsupported texture format"),
+    }
+}
+
 pub(crate) fn save_complex_data_to_image(data: &[Complex32], size: u32, name: impl Into<String>) {
     let real = GrayImage::from_par_fn(size, size, |x, y| {
         let value = data[(y * size + x) as usize];
 
-        Luma([value.re as u8])
+        Luma([(value.re * 255.0) as u8])
     });
 
     let imaginary = GrayImage::from_par_fn(size, size, |x, y| {
         let value = data[(y * size + x) as usize];
 
-        Luma([value.im as u8])
+        Luma([(value.im * 255.0) as u8])
     });
 
     let combined = GrayImage::from_par_fn(size, size, |x, y| {
         let value = data[(y * size + x) as usize];
 
-        Luma([value.norm() as u8])
+        Luma([(value.norm() * 255.0) as u8])
     });
 
     let name = name.into();
