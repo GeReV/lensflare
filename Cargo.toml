@@ -5,27 +5,25 @@ edition = "2024"
 
 [dependencies]
 winit = "0.30"
-wgpu = { version = "25.0", features = ["naga-ir"] }
+wgpu = { version = "27.0.1", features = ["naga-ir"] }
 wesl = "0.2.0"
 imgui = "0.12"
 imgui-winit-support = "0.13"
-imgui-wgpu = "0.25"
+imgui-wgpu = { git = "https://github.com/Yatekii/imgui-wgpu-rs.git", branch = "renovate/wgpu-27.x" }
 anyhow = "1.0"
 env_logger = "0.11"
 log = "0.4"
 pollster = "0.4"
 bytemuck = { version = "1.23", features = ["derive"] }
 cgmath = "0.18"
-sscanf = "0.4.4"
 itertools = "0.14.0"
 glam = { version = "0.30.9", features = ["default", "encase", "bytemuck"]}
 encase = "0.12.0"
 color = "0.3.2"
 rayon = "1.11"
 image = "0.25"
-num-complex = "0.4"
+num-complex = {  version = "0.4", features = ["default", "bytemuck"] }
 rustfft = "6.4"
-fft2d = "0.1.1"
 
 [dev-dependencies]
 rand = "0.9"
