@@ -10,6 +10,7 @@ use wgpu::{
     Texture, TextureDimension, TextureFormat, TextureSampleType, TextureUsages, TextureView,
     TextureViewDimension,
 };
+use crate::texture::TextureExt;
 
 const SRC_DST_STORAGE_TEXTURES_BIND_GROUP_LAYOUT_ENTRIES: [BindGroupLayoutEntry; 2] = [
     BindGroupLayoutEntry {
@@ -176,7 +177,7 @@ impl ComputeFftPipeline {
             view_formats: &[],
         });
 
-        let staging_texture_view = staging_texture.create_view(&TextureViewDescriptor::default());
+        let staging_texture_view = staging_texture.create_view_default();
 
         let texture_multiply_const_pipeline = TextureMultiplyConstPipeline::new(
             device,
@@ -1216,113 +1217,5 @@ impl TextureMultiplyAddPipeline {
         compute_pass.set_bind_group(0, &bind_group, &[]);
 
         compute_pass.dispatch_workgroups(invocation_count, invocation_count, 1);
-    }
-}
-
-pub(crate) struct AngularSpectrumGpu {
-    fft_pipeline: ComputeFftPipeline,
-    multiply_pipeline: MultiplyComplexPipeline,
-    generate_frequencies_pipeline: GenerateFrequenciesPipeline,
-
-    frequencies_texture: Texture,
-    frequencies_texture_view: TextureView,
-
-    staging_texture: Texture,
-    staging_texture_view: TextureView,
-}
-
-impl AngularSpectrumGpu {
-    pub fn new(
-        device: &Device,
-        compiler: &mut Wesl<StandardResolver>,
-        size: usize,
-    ) -> anyhow::Result<Self> {
-        assert!(size.is_power_of_two());
-
-        let fft_pipeline = ComputeFftPipeline::new(device, compiler, size)?;
-
-        let multiply_pipeline = MultiplyComplexPipeline::new(device, compiler, size)?;
-
-        let generate_frequencies_pipeline =
-            GenerateFrequenciesPipeline::new(device, compiler, size)?;
-
-        let frequencies_texture = device.create_texture(&TextureDescriptor {
-            label: Some("Angular Spectrum Frequencies Texture"),
-            format: TextureFormat::Rg32Float,
-            size: Extent3d {
-                width: size as u32,
-                height: size as u32,
-                depth_or_array_layers: 1,
-            },
-            usage: TextureUsages::STORAGE_BINDING,
-            dimension: TextureDimension::D2,
-            mip_level_count: 1,
-            sample_count: 1,
-            view_formats: &[],
-        });
-
-        let frequencies_texture_view =
-            frequencies_texture.create_view(&TextureViewDescriptor::default());
-
-        let staging_texture = device.create_texture(&TextureDescriptor {
-            label: Some("Angular Spectrum Staging Texture"),
-            format: TextureFormat::Rg32Float,
-            size: Extent3d {
-                width: size as u32,
-                height: size as u32,
-                depth_or_array_layers: 1,
-            },
-            usage: TextureUsages::STORAGE_BINDING | TextureUsages::TEXTURE_BINDING,
-            dimension: TextureDimension::D2,
-            mip_level_count: 1,
-            sample_count: 1,
-            view_formats: &[],
-        });
-
-        let staging_texture_view = staging_texture.create_view(&TextureViewDescriptor::default());
-
-        Ok(Self {
-            fft_pipeline,
-            multiply_pipeline,
-            generate_frequencies_pipeline,
-            frequencies_texture,
-            frequencies_texture_view,
-            staging_texture,
-            staging_texture_view,
-        })
-    }
-
-    pub fn process(
-        &self,
-        device: &Device,
-        command_encoder: &mut CommandEncoder,
-        src: &TextureView,
-        dst: &TextureView,
-        parameters: &Buffer,
-        parameters_offset: u32,
-    ) -> anyhow::Result<()> {
-        self.fft_pipeline
-            .process_fft2d(device, command_encoder, src, dst);
-
-        self.generate_frequencies_pipeline.generate(
-            device,
-            command_encoder,
-            &self.frequencies_texture_view,
-            parameters,
-            parameters_offset,
-        );
-
-        self.multiply_pipeline.multiply(
-            device,
-            command_encoder,
-            dst,
-            &self.frequencies_texture_view,
-            &self.staging_texture_view,
-        );
-
-        self.fft_pipeline
-            .process_ifft2d(device, command_encoder, &self.staging_texture_view, dst);
-
-        Ok(())
     }
 }

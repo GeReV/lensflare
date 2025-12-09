@@ -1,10 +1,8 @@
 use crate::colors::wavelength_to_rgb;
 use crate::fft::angular_spectrum::angular_spectrum;
-use crate::fft::wgpu::{
-    AngularSpectrumGpu, ComplexNormalizePipeline, CopyToComplexPipeline,
-    GenerateFrequenciesParameters, TextureMultiplyAddPipeline, TextureMultiplyConstPipeline,
-};
+use crate::fft::wgpu::{ComplexNormalizePipeline, ComputeFftPipeline, CopyToComplexPipeline, GenerateFrequenciesParameters, GenerateFrequenciesPipeline, MultiplyComplexPipeline, TextureMultiplyAddPipeline, TextureMultiplyConstPipeline};
 use crate::shaders::create_shader;
+use crate::texture::TextureExt;
 use crate::vertex::Vertex;
 use glam::Vec3;
 use image::buffer::ConvertBuffer;
@@ -15,7 +13,7 @@ use rayon::prelude::*;
 use std::f32::consts::TAU;
 use wesl::{StandardResolver, Wesl};
 use wgpu::util::{BufferInitDescriptor, DeviceExt, TextureBlitter, TextureBlitterBuilder};
-use wgpu::wgt::{TextureDescriptor, TextureViewDescriptor};
+use wgpu::wgt::TextureDescriptor;
 use wgpu::{
     BlendComponent, BlendFactor, BlendOperation, BlendState, BufferAddress, BufferUsages, Color,
     ColorTargetState, ColorWrites, CommandEncoderDescriptor, Device, Extent3d, FragmentState,
@@ -124,7 +122,7 @@ pub fn draw_ghost_polygon(
         usage: BufferUsages::INDEX,
     });
 
-    let view = texture.create_view(&TextureViewDescriptor::default());
+    let view = texture.create_view_default();
 
     let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
         label: Some("Render Ghost Encoder"),
@@ -251,7 +249,7 @@ pub fn draw_ghost_sdf(
         })
     };
 
-    let view = texture.create_view(&TextureViewDescriptor::default());
+    let view = texture.create_view_default();
 
     let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
         label: Some("Render Ghost Encoder"),
@@ -379,10 +377,13 @@ pub fn fft_ghost_gpu(
     let width = aperture_texture.width();
     let height = aperture_texture.height();
 
+    let size = width as usize;
+
     let wavelengths = wavelengths.into_iter().collect_vec();
 
     let min_storage_buffer_offset_alignment =
         device.limits().min_storage_buffer_offset_alignment as usize;
+
     let colors = wavelengths
         .iter()
         .flat_map(|&x| {
@@ -397,6 +398,12 @@ pub fn fft_ghost_gpu(
             bytes
         })
         .collect::<Vec<_>>();
+
+    let colors_buffer = device.create_buffer_init(&BufferInitDescriptor {
+        label: Some("FFT Colors Buffer"),
+        contents: &colors,
+        usage: BufferUsages::STORAGE,
+    });
 
     let angular_spectrum_parameters =
         generate_angular_spectrum_parameters_buffer(delta, z, &wavelengths)
@@ -416,51 +423,33 @@ pub fn fft_ghost_gpu(
         usage: BufferUsages::STORAGE,
     });
 
-    let colors_buffer = device.create_buffer_init(&BufferInitDescriptor {
-        label: Some("FFT Colors Buffer"),
-        contents: &colors,
-        usage: BufferUsages::STORAGE,
-    });
+    let temp_textures_rg32float = (0..3)
+        .map(|i| {
+            device.create_texture(&TextureDescriptor {
+                label: Some(&format!("Ghost Temporary Rg32Float Texture {i}")),
+                size: Extent3d {
+                    width,
+                    height,
+                    depth_or_array_layers: 1,
+                },
+                usage: TextureUsages::STORAGE_BINDING | TextureUsages::TEXTURE_BINDING,
+                format: TextureFormat::Rg32Float,
+                dimension: TextureDimension::D2,
+                sample_count: 1,
+                mip_level_count: 1,
+                view_formats: &[],
+            })
+        })
+        .collect_vec()
+        .into_boxed_slice();
 
-    let src_texture = device.create_texture(&TextureDescriptor {
-        label: Some("FFT Source Texture"),
-        format: TextureFormat::Rg32Float,
-        size: Extent3d {
-            width,
-            height,
-            depth_or_array_layers: 1,
-        },
-        usage: TextureUsages::TEXTURE_BINDING
-            | TextureUsages::STORAGE_BINDING
-            | TextureUsages::COPY_SRC,
-        dimension: TextureDimension::D2,
-        mip_level_count: 1,
-        sample_count: 1,
-        view_formats: &[],
-    });
+    let temp_texture_rg32float_views = temp_textures_rg32float
+        .iter()
+        .map(|tex| tex.create_view_default())
+        .collect_vec()
+        .into_boxed_slice();
 
-    let src_texture_view = src_texture.create_view(&TextureViewDescriptor::default());
-
-    let dst_texture = device.create_texture(&TextureDescriptor {
-        label: Some("FFT Destination Texture"),
-        format: TextureFormat::Rg32Float,
-        size: Extent3d {
-            width,
-            height,
-            depth_or_array_layers: 1,
-        },
-        usage: TextureUsages::TEXTURE_BINDING
-            | TextureUsages::STORAGE_BINDING
-            | TextureUsages::COPY_DST,
-        dimension: TextureDimension::D2,
-        mip_level_count: 1,
-        sample_count: 1,
-        view_formats: &[],
-    });
-
-    let dst_texture_view = dst_texture.create_view(&TextureViewDescriptor::default());
-
-    let temp_texture_fft = device.create_texture(&TextureDescriptor {
+    let temp_texture_r32float = device.create_texture(&TextureDescriptor {
         label: Some("FFT Temporary Texture"),
         size: Extent3d {
             width,
@@ -475,12 +464,12 @@ pub fn fft_ghost_gpu(
         view_formats: &[],
     });
 
-    let temp_texture_fft_view = temp_texture_fft.create_view(&TextureViewDescriptor::default());
+    let temp_texture_r32float_view = temp_texture_r32float.create_view_default();
 
-    let temp_textures = (0..2)
+    let temp_textures_rgba32float = (0..2)
         .map(|i| {
             device.create_texture(&TextureDescriptor {
-                label: Some(&format!("Ghost Temporary Texture {i}")),
+                label: Some(&format!("Ghost Temporary Rgba32Float Texture {i}")),
                 size: Extent3d {
                     width,
                     height,
@@ -497,9 +486,9 @@ pub fn fft_ghost_gpu(
         .collect_vec()
         .into_boxed_slice();
 
-    let mut temp_texture_views = temp_textures
+    let mut temp_texture_rgba32float_views = temp_textures_rgba32float
         .iter()
-        .map(|tex| tex.create_view(&TextureViewDescriptor::default()))
+        .map(|tex| tex.create_view_default())
         .collect_vec()
         .into_boxed_slice();
 
@@ -520,7 +509,34 @@ pub fn fft_ghost_gpu(
         view_formats: &[],
     });
 
-    let copy_to_complex_pipeline = CopyToComplexPipeline::new(device, compiler, width as usize)?;
+    let texture_view = texture.create_view_default();
+
+    let frequencies_texture = device.create_texture(&TextureDescriptor {
+        label: Some("Angular Spectrum Frequencies Texture"),
+        format: TextureFormat::Rg32Float,
+        size: Extent3d {
+            width: size as u32,
+            height: size as u32,
+            depth_or_array_layers: 1,
+        },
+        usage: TextureUsages::STORAGE_BINDING,
+        dimension: TextureDimension::D2,
+        mip_level_count: 1,
+        sample_count: 1,
+        view_formats: &[],
+    });
+
+    let frequencies_texture_view =
+        frequencies_texture.create_view_default();
+
+    let copy_to_complex_pipeline = CopyToComplexPipeline::new(device, compiler, size)?;
+
+    let fft_pipeline = ComputeFftPipeline::new(device, compiler, size)?;
+
+    let multiply_pipeline = MultiplyComplexPipeline::new(device, compiler, size)?;
+
+    let generate_frequencies_pipeline =
+        GenerateFrequenciesPipeline::new(device, compiler, size)?;
 
     let normalize_pipeline = ComplexNormalizePipeline::new(device, compiler)?;
 
@@ -533,10 +549,8 @@ pub fn fft_ghost_gpu(
         1.0 / wavelengths.len() as f32,
     )?;
 
-    let angular_spectrum_gpu = AngularSpectrumGpu::new(device, compiler, width as usize)?;
-
     let mut command_encoder = device.create_command_encoder(&CommandEncoderDescriptor {
-        label: Some("FFT Command Encoder"),
+        label: Some("Ghost FFT Command Encoder"),
     });
 
     let texture_blitter = TextureBlitter::new(device, texture.format());
@@ -556,61 +570,71 @@ pub fn fft_ghost_gpu(
         })
         .build();
 
-    let aperture_texture_view = aperture_texture.create_view(&TextureViewDescriptor::default());
+    let aperture_texture_view = aperture_texture.create_view_default();
 
     // Copy the aperture texture to the source buffer as complex numbers.
     copy_to_complex_pipeline.copy(
         device,
         &mut command_encoder,
         &aperture_texture_view,
-        &src_texture_view,
+        &temp_texture_rg32float_views[1],
     );
+
+    fft_pipeline.process_fft2d(device, &mut command_encoder, &temp_texture_rg32float_views[1], &temp_texture_rg32float_views[0]);
 
     // Perform Angular Spectrum on a series of wavelengths and accumulate the result.
     for (i, _) in wavelengths.iter().enumerate() {
-        angular_spectrum_gpu.process(
+        generate_frequencies_pipeline.generate(
             device,
             &mut command_encoder,
-            &src_texture_view,
-            &dst_texture_view,
+            &frequencies_texture_view,
             &angular_spectrum_parameters_buffer,
             (i * min_storage_buffer_offset_alignment) as u32,
-        )?;
+        );
+
+        multiply_pipeline.multiply(
+            device,
+            &mut command_encoder,
+            &temp_texture_rg32float_views[0],
+            &frequencies_texture_view,
+            &temp_texture_rg32float_views[1],
+        );
+
+        fft_pipeline
+            .process_ifft2d(device, &mut command_encoder, &temp_texture_rg32float_views[1], &temp_texture_rg32float_views[2]);
 
         normalize_pipeline.normalize(
             device,
             &mut command_encoder,
-            &dst_texture_view,
-            &temp_texture_fft_view,
+            &temp_texture_rg32float_views[2],
+            &temp_texture_r32float_view,
         );
 
         texture_multiply_add.process(
             device,
             &mut command_encoder,
-            &temp_texture_views[0],
-            &temp_texture_fft_view,
-            &temp_texture_views[1],
+            &temp_texture_rgba32float_views[0],
+            &temp_texture_r32float_view,
+            &temp_texture_rgba32float_views[1],
             &colors_buffer.slice((i * min_storage_buffer_offset_alignment) as BufferAddress..),
         );
 
-        temp_texture_views.swap(0, 1);
+        temp_texture_rgba32float_views.swap(0, 1);
     }
 
     // Average the accumulated result
     texture_multiply_constant.process(
         device,
         &mut command_encoder,
-        &temp_texture_views[0],
-        &temp_texture_views[1],
+        &temp_texture_rgba32float_views[0],
+        &temp_texture_rgba32float_views[1],
     );
-
-    let texture_view = texture.create_view(&TextureViewDescriptor::default());
 
     // Copy to final texture
     texture_blitter.copy(
         device,
         &mut command_encoder,
-        &temp_texture_views[1],
+        &temp_texture_rgba32float_views[1],
         &texture_view,
     );
 

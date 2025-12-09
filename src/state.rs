@@ -30,6 +30,7 @@ use winit::event::{MouseButton, MouseScrollDelta};
 use winit::event_loop::ActiveEventLoop;
 use winit::keyboard::KeyCode;
 use winit::window::Window;
+use crate::texture::TextureExt;
 // TODO: Render ghosts without alpha?
 
 pub(crate) struct ImguiState {
@@ -443,7 +444,7 @@ impl State {
             ..Default::default()
         });
 
-        let ghost_texture_view = ghost_texture.create_view(&TextureViewDescriptor::default());
+        let ghost_texture_view = ghost_texture.create_view_default();
 
         let params = ParamsUniform {
             debug_wireframe_alpha: 0.0,
@@ -607,7 +608,7 @@ impl State {
                 ..Default::default()
             });
 
-            let texture_view = render_target.create_view(&TextureViewDescriptor::default());
+            let texture_view = render_target.create_view_default();
 
             let bind_group = device.create_bind_group(&BindGroupDescriptor {
                 label: Some("Render Fullscreen Bind Group"),
@@ -1440,7 +1441,7 @@ impl State {
 
         let view = self
             .render_target
-            .create_view(&TextureViewDescriptor::default());
+            .create_view_default();
 
         let mut encoder = self
             .device
@@ -1589,7 +1590,7 @@ impl State {
 
         let output_view = output
             .texture
-            .create_view(&TextureViewDescriptor::default());
+            .create_view_default();
 
         {
             let mut render_pass = encoder.begin_render_pass(&RenderPassDescriptor {
@@ -1620,7 +1621,7 @@ impl State {
                 color_attachments: &[Some(RenderPassColorAttachment {
                     view: &output
                         .texture
-                        .create_view(&TextureViewDescriptor::default()),
+                        .create_view_default(),
                     depth_slice: None,
                     resolve_target: None,
                     ops: Operations {

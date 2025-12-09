@@ -14,6 +14,7 @@ mod utils;
 mod ghost;
 mod fft;
 mod colors;
+mod texture;
 
 use anyhow::*;
 use winit::event_loop::EventLoop;
