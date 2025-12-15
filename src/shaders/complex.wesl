@@ -25,8 +25,12 @@ fn complex_conjugate(a: Complex) -> Complex {
 	return Complex(a.re, -a.im);
 }
 
+fn complex_magnitude_sq(a: Complex) -> f32 {
+	return a.re * a.re + a.im * a.im;
+}
+
 fn complex_magnitude(a: Complex) -> f32 {
-	return sqrt(a.re * a.re + a.im * a.im);
+	return sqrt(complex_magnitude_sq(a));
 }
 
 fn complex_normalize(a: Complex) -> Complex {

@@ -1,4 +1,7 @@
 use std::ops::{Add, Div, Mul, Rem, Sub};
+use glam::{Vec3, Vec4};
+use wgpu::{BlendComponent, BlendFactor, BlendOperation, BlendState};
+use crate::colors::wavelength_to_rgb;
 
 pub trait NumOps<Rhs = Self, Output = Self>:
     Add<Rhs, Output = Output>
@@ -37,3 +40,23 @@ impl<T> Remap for T where T: Copy + NumOps {
         remap(*self, from_min, from_max, to_min, to_max)
     }
 }
+
+pub fn wavelengths_to_colors(wavelengths: &[f32]) -> Vec<Vec4> {
+    wavelengths
+        .iter()
+        .map(|&wavelength| wavelength_to_rgb(wavelength).clamp(Vec3::ZERO, Vec3::ONE).extend(1.0))
+        .collect()
+}
+
+pub const ADDITIVE_BLEND: BlendState = BlendState {
+    color: BlendComponent {
+        src_factor: BlendFactor::One,
+        dst_factor: BlendFactor::One,
+        operation: BlendOperation::Add,
+    },
+    alpha: BlendComponent {
+        src_factor: BlendFactor::One,
+        dst_factor: BlendFactor::One,
+        operation: BlendOperation::Add,
+    },
+};

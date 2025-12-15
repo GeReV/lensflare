@@ -799,7 +799,8 @@ impl MultiplyComplexPipeline {
 }
 
 pub struct ComplexNormalizePipeline {
-    pipeline: ComputePipeline,
+    pipeline_normalize: ComputePipeline,
+    pipeline_normalize_squared: ComputePipeline,
     bind_group_layout: BindGroupLayout,
 }
 
@@ -843,7 +844,7 @@ impl ComplexNormalizePipeline {
             push_constant_ranges: &[],
         });
 
-        let pipeline = device.create_compute_pipeline(&ComputePipelineDescriptor {
+        let pipeline_normalize = device.create_compute_pipeline(&ComputePipelineDescriptor {
             label: Some("Complex Normalize Compute Pipeline"),
             layout: Some(&pipeline_layout),
             module: &module,
@@ -852,8 +853,18 @@ impl ComplexNormalizePipeline {
             cache: None,
         });
 
+        let pipeline_normalize_squared = device.create_compute_pipeline(&ComputePipelineDescriptor {
+            label: Some("Complex Normalize Squared Compute Pipeline"),
+            layout: Some(&pipeline_layout),
+            module: &module,
+            entry_point: Some("normalize_sq"),
+            compilation_options: PipelineCompilationOptions::default(),
+            cache: None,
+        });
+
         Ok(Self {
-            pipeline,
+            pipeline_normalize,
+            pipeline_normalize_squared,
             bind_group_layout,
         })
     }
@@ -865,6 +876,26 @@ impl ComplexNormalizePipeline {
         src: &TextureView,
         dst: &TextureView,
     ) {
+        self.process("Complex Normalize", device, &self.pipeline_normalize, command_encoder, src, dst);
+    }
+
+    pub fn normalize_sq(
+        &self,
+        device: &Device,
+        command_encoder: &mut CommandEncoder,
+        src: &TextureView,
+        dst: &TextureView,
+    ) {
+        self.process("Complex Normalize Squared", device, &self.pipeline_normalize_squared, command_encoder, src, dst);
+    }
+
+    fn process(&self,
+               label: &str,
+               device: &Device,
+               pipeline: &ComputePipeline,
+               command_encoder: &mut CommandEncoder,
+               src: &TextureView,
+               dst: &TextureView) {
         debug_assert!(
             src.texture()
                 .usage()
@@ -887,14 +918,14 @@ impl ComplexNormalizePipeline {
         );
 
         let mut compute_pass = command_encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-            label: Some("Complex Normalize Compute Pass"),
+            label: Some(&format!("{label} Compute Pass")),
             timestamp_writes: None,
         });
 
-        compute_pass.set_pipeline(&self.pipeline);
+        compute_pass.set_pipeline(&pipeline);
 
         let bind_group = device.create_bind_group(&BindGroupDescriptor {
-            label: Some("Complex Normalize Bind Group"),
+            label: Some(&format!("{label} Bind Group")),
             layout: &self.bind_group_layout,
             entries: &[
                 wgpu::BindGroupEntry {

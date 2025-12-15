@@ -15,6 +15,7 @@ mod ghost;
 mod fft;
 mod colors;
 mod texture;
+mod starburst;
 
 use anyhow::*;
 use winit::event_loop::EventLoop;

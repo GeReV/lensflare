@@ -7,10 +7,13 @@ use crate::lenses::{Lens, LensInterface};
 use crate::registry::{Id, Registry};
 use crate::shaders::create_shader;
 use crate::software::calculate_grid_triangle_area_variance;
+use crate::starburst::create_starburst_gpu;
+use crate::texture::TextureExt;
 use crate::uniforms::{
     BouncesAndLengthsUniform, CameraUniform, GridLimitsUniform, LensSystemUniform, ParamsUniform,
     Uniform,
 };
+use crate::utils::ADDITIVE_BLEND;
 use crate::vertex::{ColoredVertex, Vertex};
 use encase::{StorageBuffer, UniformBuffer};
 use glam::{vec3, vec4, Vec3, Vec3Swizzles, Vec4};
@@ -21,16 +24,26 @@ use itertools::{Itertools, MinMaxResult};
 use std::collections::HashMap;
 use std::f32::consts::PI;
 use std::time::{Duration, Instant};
-use image::GrayImage;
 use wesl::{StandardResolver, Wesl};
 use wgpu::util::{BufferInitDescriptor, DeviceExt};
-use wgpu::wgt::{SamplerDescriptor, TextureDescriptor, TextureViewDescriptor};
-use wgpu::{AddressMode, Backends, BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayout, BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingResource, BindingType, BlendComponent, BlendFactor, BlendOperation, BlendState, Buffer, BufferAddress, BufferBindingType, BufferDescriptor, BufferUsages, Color, ColorTargetState, ColorWrites, CommandEncoderDescriptor, Device, DeviceDescriptor, Extent3d, Face, Features, FilterMode, FragmentState, FrontFace, IndexFormat, Instance, InstanceDescriptor, Label, Limits, LoadOp, MultisampleState, Operations, PipelineCompilationOptions, PipelineLayoutDescriptor, PolygonMode, PowerPreference, PresentMode, PrimitiveState, PrimitiveTopology, Queue, RenderPass, RenderPassColorAttachment, RenderPassDescriptor, RenderPipeline, RenderPipelineDescriptor, RequestAdapterOptions, SamplerBindingType, ShaderModule, ShaderStages, StoreOp, Surface, SurfaceConfiguration, Texture, TextureDimension, TextureFormat, TextureSampleType, TextureUsages, TextureViewDimension, Trace, VertexState};
+use wgpu::wgt::{SamplerDescriptor, TextureDescriptor};
+use wgpu::{
+    AddressMode, Backends, BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayout,
+    BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingResource, BindingType, BlendState,
+    Buffer, BufferAddress, BufferBindingType, BufferDescriptor, BufferUsages, Color,
+    ColorTargetState, ColorWrites, CommandEncoderDescriptor, Device, DeviceDescriptor, Extent3d,
+    Face, Features, FilterMode, FragmentState, FrontFace, IndexFormat, Instance,
+    InstanceDescriptor, Label, LoadOp, MultisampleState, Operations, PipelineCompilationOptions,
+    PipelineLayoutDescriptor, PolygonMode, PowerPreference, PresentMode, PrimitiveState,
+    PrimitiveTopology, Queue, RenderPass, RenderPassColorAttachment, RenderPassDescriptor,
+    RenderPipeline, RenderPipelineDescriptor, RequestAdapterOptions, SamplerBindingType,
+    ShaderModule, ShaderStages, StoreOp, Surface, SurfaceConfiguration, Texture, TextureDimension,
+    TextureFormat, TextureSampleType, TextureUsages, TextureViewDimension, Trace, VertexState,
+};
 use winit::event::{MouseButton, MouseScrollDelta};
 use winit::event_loop::ActiveEventLoop;
 use winit::keyboard::KeyCode;
 use winit::window::Window;
-use crate::texture::TextureExt;
 // TODO: Render ghosts without alpha?
 
 pub(crate) struct ImguiState {
@@ -42,24 +55,12 @@ pub(crate) struct ImguiState {
 
 #[derive(PartialEq, Eq, Clone, Copy, Debug, Hash)]
 enum PipelineId {
-    Fill,
+    Starburst,
+    Ghosts,
     Wireframe,
     Lines,
     Fullscreen,
 }
-
-const ADDITIVE_BLEND: BlendState = BlendState {
-    color: BlendComponent {
-        src_factor: BlendFactor::One,
-        dst_factor: BlendFactor::One,
-        operation: BlendOperation::Add,
-    },
-    alpha: BlendComponent {
-        src_factor: BlendFactor::One,
-        dst_factor: BlendFactor::One,
-        operation: BlendOperation::Add,
-    },
-};
 
 const MIN_GRID_LOG2_SIZE: usize = 4;
 
@@ -92,15 +93,14 @@ pub struct State {
     bind_group_layouts: Registry<BindGroupLayout>,
     bind_groups: Registry<BindGroup>,
 
-    default_shader_bind_group_layouts: Vec<Id<BindGroupLayout>>,
-
     camera_uniform: Uniform<CameraUniform>,
     lenses_uniform: Uniform<LensSystemUniform>,
     bounces_and_lengths_uniform: Uniform<BouncesAndLengthsUniform>,
     grid_limits_uniform: Uniform<GridLimitsUniform>,
     params_uniform: Uniform<ParamsUniform>,
 
-    fullscreen_bind_group_layout_id: Id<BindGroupLayout>,
+    starburst_texture_bind_group_id: Id<BindGroup>,
+    ghost_texture_bind_group_id: Id<BindGroup>,
     fullscreen_bind_group_id: Id<BindGroup>,
 
     pub(crate) light_pos: Vec4,
@@ -124,7 +124,8 @@ pub struct State {
     draw_axes: bool,
     pub aperture_texture: Texture,
 
-    frame: u64
+    frame: u64,
+    pub texture_bind_group_layout_id: Id<BindGroupLayout>,
 }
 
 const DEBUG_RAY_COUNT: isize = 48 + 1;
@@ -397,15 +398,13 @@ impl State {
             )?,
         });
 
-        let aperture_texture = draw_ghost_sdf(
-            &device,
-            &queue,
-            &mut compiler,
-            1024,
-            8,
-            0.9,
-            -7.5_f32.to_radians(),
-        )?;
+        let aperture_texture = draw_ghost_sdf(&device, &queue, &mut compiler, 1024, 8, 0.9, 0.0)?;
+
+        let wavelength_step = 5;
+        let wavelengths_nm = (380..800)
+            .step_by(wavelength_step)
+            .map(|wavelength| wavelength as f32)
+            .collect_vec();
 
         // let ghost_texture = generate_fft_ghost_texture_cpu(&device, &queue, &aperture_texture)?;
 
@@ -418,11 +417,6 @@ impl State {
             // Focal length in meters
             let z = 10e-3;
 
-            let wavelength_step = 5;
-            let wavelengths_nm = (380..800)
-                .step_by(wavelength_step)
-                .map(|wavelength| wavelength as f32);
-
             fft_ghost_gpu(
                 &device,
                 &queue,
@@ -430,12 +424,23 @@ impl State {
                 &aperture_texture,
                 dx,
                 z,
-                wavelengths_nm,
+                &wavelengths_nm,
             )
         }?;
 
-        let ghost_texture_sampler = device.create_sampler(&SamplerDescriptor {
-            label: Some("Ghost Texture Sampler"),
+        let ghost_texture_view = ghost_texture.create_view_default();
+
+        let starburst_texture = create_starburst_gpu(
+            &device,
+            &queue,
+            &mut compiler,
+            &aperture_texture,
+            &wavelengths_nm,
+        )?;
+        let starburst_texture_view = starburst_texture.create_view_default();
+
+        let texture_sampler = device.create_sampler(&SamplerDescriptor {
+            label: Some("Default Texture Sampler"),
             address_mode_u: AddressMode::ClampToEdge,
             address_mode_v: AddressMode::ClampToEdge,
             mag_filter: FilterMode::Linear,
@@ -444,14 +449,13 @@ impl State {
             ..Default::default()
         });
 
-        let ghost_texture_view = ghost_texture.create_view_default();
-
         let params = ParamsUniform {
             debug_wireframe_alpha: 0.0,
             debug_interpolate: 1.0,
+            starburst_scale: 1.0,
             ray_dir,
             bid: -1,
-            intensity: 0.5,
+            intensity: 1.0,
             lambda: 520.0, // 520 nm is some green color.
         };
 
@@ -461,28 +465,18 @@ impl State {
             contents: &UniformBuffer::<ParamsUniform>::content_of::<_, Vec<u8>>(&params)?,
         });
 
-        let params_bind_group_layout =
+        let texture_bind_group_layout =
             device.create_bind_group_layout(&BindGroupLayoutDescriptor {
-                label: Some("Params Bind Group Layout"),
+                label: Some("Texture Bind Group Layout"),
                 entries: &[
                     BindGroupLayoutEntry {
                         binding: 0,
-                        visibility: ShaderStages::VERTEX_FRAGMENT,
-                        ty: BindingType::Buffer {
-                            ty: BufferBindingType::Uniform,
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
-                    },
-                    BindGroupLayoutEntry {
-                        binding: 1,
                         visibility: ShaderStages::FRAGMENT,
                         ty: BindingType::Sampler(SamplerBindingType::Filtering),
                         count: None,
                     },
                     BindGroupLayoutEntry {
-                        binding: 2,
+                        binding: 1,
                         visibility: ShaderStages::FRAGMENT,
                         ty: BindingType::Texture {
                             sample_type: TextureSampleType::Float { filterable: true },
@@ -494,23 +488,62 @@ impl State {
                 ],
             });
 
-        let params_bind_group = device.create_bind_group(&BindGroupDescriptor {
-            label: Some("Params Bind Group"),
-            layout: &params_bind_group_layout,
+        let ghost_texture_bind_group = device.create_bind_group(&BindGroupDescriptor {
+            label: Some("Ghost Texture Bind Group"),
+            layout: &texture_bind_group_layout,
             entries: &[
                 BindGroupEntry {
                     binding: 0,
-                    resource: params_buffer.as_entire_binding(),
+                    resource: BindingResource::Sampler(&texture_sampler),
                 },
                 BindGroupEntry {
                     binding: 1,
-                    resource: BindingResource::Sampler(&ghost_texture_sampler),
-                },
-                BindGroupEntry {
-                    binding: 2,
                     resource: BindingResource::TextureView(&ghost_texture_view),
                 },
             ],
+        });
+        let ghost_texture_bind_group_id = bind_groups.add(ghost_texture_bind_group);
+
+        let starburst_texture_bind_group = device.create_bind_group(&BindGroupDescriptor {
+            label: Some("Starburst Texture Bind Group"),
+            layout: &texture_bind_group_layout,
+            entries: &[
+                BindGroupEntry {
+                    binding: 0,
+                    resource: BindingResource::Sampler(&texture_sampler),
+                },
+                BindGroupEntry {
+                    binding: 1,
+                    resource: BindingResource::TextureView(&starburst_texture_view),
+                },
+            ],
+        });
+        let starburst_texture_bind_group_id = bind_groups.add(starburst_texture_bind_group);
+
+        let texture_bind_group_layout_id = bind_group_layouts.add(texture_bind_group_layout);
+
+        let params_bind_group_layout =
+            device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+                label: Some("Params Bind Group Layout"),
+                entries: &[BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: ShaderStages::VERTEX_FRAGMENT,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                }],
+            });
+
+        let params_bind_group = device.create_bind_group(&BindGroupDescriptor {
+            label: Some("Params Bind Group"),
+            layout: &params_bind_group_layout,
+            entries: &[BindGroupEntry {
+                binding: 0,
+                resource: params_buffer.as_entire_binding(),
+            }],
         });
 
         let params_bind_group_layout_id = bind_group_layouts.add(params_bind_group_layout);
@@ -553,56 +586,29 @@ impl State {
             mapped_at_creation: false,
         });
 
-        let default_shader_bind_group_layouts = vec![
-            camera_uniform.bind_group_layout_id.clone(),
-            lenses_uniform.bind_group_layout_id.clone(),
-            params_uniform.bind_group_layout_id.clone(),
-        ];
-
         let mut render_pipelines = HashMap::new();
 
         Self::create_static_render_pipelines(
             &device,
             &mut compiler,
             &mut render_pipelines,
-            &default_shader_bind_group_layouts
-                .iter()
-                .map(|bind_group_layout_id| &bind_group_layouts[bind_group_layout_id])
-                .collect_vec(),
+            &[
+                &camera_uniform.bind_group_layout_id,
+                &lenses_uniform.bind_group_layout_id,
+                &params_uniform.bind_group_layout_id,
+            ]
+            .iter()
+            .map(|&bind_group_layout_id| &bind_group_layouts[bind_group_layout_id])
+            .collect_vec(),
         );
 
-        let mut hot_reload_shaders = Vec::new();
+        let hot_reload_shaders = vec![
+            HotReloadShader::new("src/shaders/render_ghosts.wesl"),
+            HotReloadShader::new("src/shaders/render_starburst.wesl"),
+            HotReloadShader::new("src/shaders/fullscreen.wesl"),
+        ];
 
-        hot_reload_shaders.push(HotReloadShader::new("src/shaders/shader.wesl"));
-        hot_reload_shaders.push(HotReloadShader::new("src/shaders/fullscreen.wesl"));
-
-        let (fullscreen_bind_group_layout_id, fullscreen_bind_group_id) = {
-            let fullscreen_bind_group_layout =
-                device.create_bind_group_layout(&BindGroupLayoutDescriptor {
-                    label: Some("Render Fullscreen Bind Group Layout"),
-                    entries: &[
-                        BindGroupLayoutEntry {
-                            binding: 0,
-                            visibility: ShaderStages::FRAGMENT,
-                            ty: BindingType::Sampler(SamplerBindingType::Filtering),
-                            count: None,
-                        },
-                        BindGroupLayoutEntry {
-                            binding: 1,
-                            visibility: ShaderStages::FRAGMENT,
-                            ty: BindingType::Texture {
-                                sample_type: TextureSampleType::Float { filterable: true },
-                                view_dimension: TextureViewDimension::D2,
-                                multisampled: false,
-                            },
-                            count: None,
-                        },
-                    ],
-                });
-
-            let fullscreen_bind_group_layout_id =
-                bind_group_layouts.add(fullscreen_bind_group_layout);
-
+        let fullscreen_bind_group_id = {
             let sampler = device.create_sampler(&SamplerDescriptor {
                 label: Some("Render Fullscreen Texture Sampler"),
                 ..Default::default()
@@ -612,7 +618,7 @@ impl State {
 
             let bind_group = device.create_bind_group(&BindGroupDescriptor {
                 label: Some("Render Fullscreen Bind Group"),
-                layout: &bind_group_layouts[&fullscreen_bind_group_layout_id],
+                layout: &bind_group_layouts[&texture_bind_group_layout_id],
                 entries: &[
                     BindGroupEntry {
                         binding: 0,
@@ -627,7 +633,7 @@ impl State {
 
             let fullscreen_bind_group_id = bind_groups.add(bind_group);
 
-            (fullscreen_bind_group_layout_id, fullscreen_bind_group_id)
+            fullscreen_bind_group_id
         };
 
         let imgui = Self::setup_imgui(&window, &device, &queue, surface_format);
@@ -677,8 +683,6 @@ impl State {
 
             render_target,
 
-            default_shader_bind_group_layouts,
-
             compiler,
             hot_reload_shaders,
 
@@ -688,11 +692,15 @@ impl State {
 
             camera_uniform,
             lenses_uniform,
+            params_uniform,
             bounces_and_lengths_uniform,
             grid_limits_uniform,
-            params_uniform,
 
-            fullscreen_bind_group_layout_id,
+            texture_bind_group_layout_id,
+
+            ghost_texture_bind_group_id,
+            starburst_texture_bind_group_id,
+
             fullscreen_bind_group_id,
 
             light_pos: vec4(-0.5, -0.2, 0.0, 0.0),
@@ -964,7 +972,7 @@ impl State {
         device: &Device,
         compiler: &mut Wesl<StandardResolver>,
         render_pipelines: &mut HashMap<PipelineId, RenderPipeline>,
-        default_bind_group_layouts: &Vec<&BindGroupLayout>,
+        default_bind_group_layouts: &[&BindGroupLayout],
     ) {
         let lines_shader = create_shader(
             device,
@@ -1050,25 +1058,29 @@ impl State {
 
             if let Some(name) = shader.path.file_prefix().unwrap().to_str() {
                 match name {
-                    "shader" => {
-                        let default_bind_group_layouts = self
-                            .default_shader_bind_group_layouts
-                            .iter()
-                            .map(|id| &self.bind_group_layouts[id])
-                            .collect_vec();
+                    "render_ghosts" => {
+                        let bind_group_layouts = [
+                            &self.camera_uniform.bind_group_layout_id,
+                            &self.lenses_uniform.bind_group_layout_id,
+                            &self.params_uniform.bind_group_layout_id,
+                            &self.texture_bind_group_layout_id,
+                        ]
+                        .iter()
+                        .map(|&id| &self.bind_group_layouts[id])
+                        .collect_vec();
 
                         match Self::create_default_render_pipeline(
                             &self.device,
-                            None,
+                            Some("Ghost"),
                             TextureFormat::Rgba16Float,
                             &shader_module,
-                            &default_bind_group_layouts,
+                            &bind_group_layouts,
                             None,
                         ) {
                             Ok(pipeline) => {
                                 shader.shader_last_error = None;
 
-                                self.render_pipelines.insert(PipelineId::Fill, pipeline);
+                                self.render_pipelines.insert(PipelineId::Ghosts, pipeline);
                             }
                             Err(err) => {
                                 shader.shader_last_error = Some(err.to_string());
@@ -1080,7 +1092,7 @@ impl State {
                             Some("Render Wireframe Pipeline"),
                             TextureFormat::Rgba16Float,
                             &shader_module,
-                            &default_bind_group_layouts,
+                            &bind_group_layouts,
                             Some(PrimitiveState {
                                 topology: PrimitiveTopology::LineList,
                                 front_face: FrontFace::Cw,
@@ -1100,13 +1112,82 @@ impl State {
                             }
                         };
                     }
+                    "render_starburst" => {
+                        let bind_group_layouts = [
+                            &self.camera_uniform.bind_group_layout_id,
+                            &self.lenses_uniform.bind_group_layout_id,
+                            &self.params_uniform.bind_group_layout_id,
+                            &self.texture_bind_group_layout_id,
+                        ]
+                        .iter()
+                        .map(|&id| &self.bind_group_layouts[id])
+                        .collect_vec();
+
+                        let render_pipeline_layout =
+                            self.device
+                                .create_pipeline_layout(&PipelineLayoutDescriptor {
+                                    label: Some("Starburst Render Pipeline Layout"),
+                                    bind_group_layouts: &bind_group_layouts,
+                                    push_constant_ranges: &[],
+                                });
+
+                        let render_pipeline =
+                            self.device
+                                .create_render_pipeline(&RenderPipelineDescriptor {
+                                    label: Some("Starburst Render Pipeline"),
+                                    layout: Some(&render_pipeline_layout),
+                                    vertex: VertexState {
+                                        module: &shader_module,
+                                        entry_point: Some("vs_main"),
+                                        buffers: &[],
+                                        compilation_options: PipelineCompilationOptions::default(),
+                                    },
+                                    fragment: Some(FragmentState {
+                                        module: &shader_module,
+                                        entry_point: Some("fs_main"),
+                                        targets: &[Some(ColorTargetState {
+                                            format: TextureFormat::Rgba16Float,
+                                            blend: Some(ADDITIVE_BLEND),
+                                            write_mask: ColorWrites::ALL,
+                                        })],
+                                        compilation_options: PipelineCompilationOptions::default(),
+                                    }),
+                                    primitive: PrimitiveState {
+                                        topology: PrimitiveTopology::TriangleList,
+                                        strip_index_format: None,
+                                        front_face: FrontFace::Cw,
+                                        cull_mode: None, // Some(Face::Back),
+                                        // Setting this to anything other than Fill requires Features::NON_FILL_POLYGON_MODE
+                                        polygon_mode: PolygonMode::Fill,
+                                        // Requires Features::DEPTH_CLIP_CONTROL
+                                        unclipped_depth: false,
+                                        // Requires Features::CONSERVATIVE_RASTERIZATION
+                                        conservative: false,
+                                    },
+                                    depth_stencil: None,
+                                    multisample: MultisampleState {
+                                        count: 1,
+                                        mask: !0,
+                                        alpha_to_coverage_enabled: false,
+                                    },
+                                    multiview: None,
+                                    cache: None,
+                                });
+
+                        shader.shader_last_error = None;
+
+                        self.render_pipelines
+                            .insert(PipelineId::Starburst, render_pipeline);
+                    }
                     "fullscreen" => {
+                        let fullscreen_bind_group_layout =
+                            &self.bind_group_layouts[&self.texture_bind_group_layout_id];
+
                         let render_pipeline_layout =
                             self.device
                                 .create_pipeline_layout(&PipelineLayoutDescriptor {
                                     label: Some("Render Fullscreen Pipeline Layout"),
-                                    bind_group_layouts: &[&self.bind_group_layouts
-                                        [&self.fullscreen_bind_group_layout_id]],
+                                    bind_group_layouts: &[fullscreen_bind_group_layout],
                                     push_constant_ranges: &[],
                                 });
 
@@ -1152,6 +1233,8 @@ impl State {
                                     multiview: None,
                                     cache: None,
                                 });
+
+                        shader.shader_last_error = None;
 
                         self.render_pipelines
                             .insert(PipelineId::Fullscreen, render_pipeline_fullscreen);
@@ -1232,7 +1315,7 @@ impl State {
         let mut platform = WinitPlatform::new(&mut context);
         platform.attach_window(
             context.io_mut(),
-            &window,
+            window,
             imgui_winit_support::HiDpiMode::Default,
         );
         context.set_ini_filename(None);
@@ -1439,9 +1522,7 @@ impl State {
             return anyhow::Ok(());
         }
 
-        let view = self
-            .render_target
-            .create_view_default();
+        let view = self.render_target.create_view_default();
 
         let mut encoder = self
             .device
@@ -1469,61 +1550,86 @@ impl State {
                 occlusion_query_set: None,
             });
 
-            let binds = [
-                &self.camera_uniform.bind_group_id,
-                &self.lenses_uniform.bind_group_id,
-                &self.params_uniform.bind_group_id,
-            ];
+            // Starburst
+            {
+                let binds = [
+                    &self.camera_uniform.bind_group_id,
+                    &self.lenses_uniform.bind_group_id,
+                    &self.params_uniform.bind_group_id,
+                    &self.starburst_texture_bind_group_id,
+                ];
 
-            for (i, &bind_group_id) in binds.iter().enumerate() {
-                render_pass.set_bind_group(i as u32, &self.bind_groups[bind_group_id], &[]);
-            }
+                for (i, &bind_group_id) in binds.iter().enumerate() {
+                    render_pass.set_bind_group(i as u32, &self.bind_groups[bind_group_id], &[]);
+                }
 
-            render_pass.set_vertex_buffer(0, self.grids_vertex_buffer.slice(..));
-            render_pass.set_index_buffer(self.grids_index_buffer.slice(..), IndexFormat::Uint32);
+                if let Some(render_pipeline) = self.render_pipelines.get(&PipelineId::Starburst) {
+                    render_pass.set_pipeline(render_pipeline);
 
-            let selected_bid = self.params_uniform.data.bid;
-            let bounce_range = if selected_bid < 0 {
-                0..self.lenses_uniform.data.bounce_count
-            } else {
-                selected_bid as u32..(selected_bid + 1) as u32
-            };
-
-            if let Some(render_pipeline) = self.render_pipelines.get(&PipelineId::Fill) {
-                render_pass.set_pipeline(render_pipeline);
-
-                for bid in bounce_range.clone() {
-                    let grid_size = self.bounces_grid_log2_sizes[bid as usize] as usize;
-                    let grid_size = 16;
-
-                    let (vertex_range, index_range) =
-                        self.grids.get_grid_size_index_ranges(grid_size).unwrap();
-
-                    render_pass.draw_indexed(
-                        index_range,
-                        vertex_range.start as i32,
-                        (bid * 3)..(bid + 1) * 3,
-                    );
+                    render_pass.draw(0..6, 0..1);
                 }
             }
 
-            // if let Some(render_pipeline) = self.render_pipelines.get(&PipelineId::Wireframe) {
-            //     render_pass.set_pipeline(render_pipeline);
-            //
-            //     for bid in bounce_range.clone() {
-            //         let grid_size = self.bounces_grid_log2_sizes[bid as usize] as usize;
-            //         let grid_size = 32;
-            //
-            //         let (vertex_range, index_range) =
-            //             self.grids.get_grid_size_index_ranges(grid_size).unwrap();
-            //
-            //         render_pass.draw_indexed(
-            //             index_range,
-            //             vertex_range.start as i32,
-            //             (bid * 3)..(bid + 1) * 3,
-            //         );
-            //     }
-            // }
+            // Ghosts
+            {
+                let binds = [
+                    &self.camera_uniform.bind_group_id,
+                    &self.lenses_uniform.bind_group_id,
+                    &self.params_uniform.bind_group_id,
+                    &self.ghost_texture_bind_group_id,
+                ];
+
+                for (i, &bind_group_id) in binds.iter().enumerate() {
+                    render_pass.set_bind_group(i as u32, &self.bind_groups[bind_group_id], &[]);
+                }
+
+                render_pass.set_vertex_buffer(0, self.grids_vertex_buffer.slice(..));
+                render_pass
+                    .set_index_buffer(self.grids_index_buffer.slice(..), IndexFormat::Uint32);
+
+                let selected_bid = self.params_uniform.data.bid;
+                let bounce_range = if selected_bid < 0 {
+                    0..self.lenses_uniform.data.bounce_count
+                } else {
+                    selected_bid as u32..(selected_bid + 1) as u32
+                };
+
+                if let Some(render_pipeline) = self.render_pipelines.get(&PipelineId::Ghosts) {
+                    render_pass.set_pipeline(render_pipeline);
+
+                    for bid in bounce_range.clone() {
+                        let grid_size = self.bounces_grid_log2_sizes[bid as usize] as usize;
+                        let grid_size = 16;
+
+                        let (vertex_range, index_range) =
+                            self.grids.get_grid_size_index_ranges(grid_size).unwrap();
+
+                        render_pass.draw_indexed(
+                            index_range,
+                            vertex_range.start as i32,
+                            (bid * 3)..(bid + 1) * 3,
+                        );
+                    }
+                }
+
+                // if let Some(render_pipeline) = self.render_pipelines.get(&PipelineId::Wireframe) {
+                //     render_pass.set_pipeline(render_pipeline);
+                //
+                //     for bid in bounce_range.clone() {
+                //         let grid_size = self.bounces_grid_log2_sizes[bid as usize] as usize;
+                //         let grid_size = 32;
+                //
+                //         let (vertex_range, index_range) =
+                //             self.grids.get_grid_size_index_ranges(grid_size).unwrap();
+                //
+                //         render_pass.draw_indexed(
+                //             index_range,
+                //             vertex_range.start as i32,
+                //             (bid * 3)..(bid + 1) * 3,
+                //         );
+                //     }
+                // }
+            }
         }
 
         {
@@ -1588,9 +1694,7 @@ impl State {
             render_pass.draw(0..self.ray_lines_vertices.len() as u32, 0..1);
         }
 
-        let output_view = output
-            .texture
-            .create_view_default();
+        let output_view = output.texture.create_view_default();
 
         {
             let mut render_pass = encoder.begin_render_pass(&RenderPassDescriptor {
@@ -1619,9 +1723,7 @@ impl State {
             let mut render_pass = encoder.begin_render_pass(&RenderPassDescriptor {
                 label: Some("UI Pass"),
                 color_attachments: &[Some(RenderPassColorAttachment {
-                    view: &output
-                        .texture
-                        .create_view_default(),
+                    view: &output.texture.create_view_default(),
                     depth_slice: None,
                     resolve_target: None,
                     ops: Operations {
@@ -1649,16 +1751,25 @@ impl State {
             let wavelength_step = 5;
             let wavelengths_nm = (380..800)
                 .step_by(wavelength_step)
-                .map(|wavelength| wavelength as f32);
+                .map(|wavelength| wavelength as f32)
+                .collect_vec();
 
-            fft_ghost_gpu(
+            // fft_ghost_gpu(
+            //     &self.device,
+            //     &self.queue,
+            //     &mut self.compiler,
+            //     &self.aperture_texture,
+            //     dx,
+            //     z,
+            //     &wavelengths_nm,
+            // )?;
+
+            create_starburst_gpu(
                 &self.device,
                 &self.queue,
                 &mut self.compiler,
                 &self.aperture_texture,
-                dx,
-                z,
-                wavelengths_nm,
+                &wavelengths_nm,
             )?;
         }
 
@@ -1775,6 +1886,24 @@ impl State {
                         &mut self.params_uniform.data.debug_interpolate,
                     );
 
+                    ui.separator();
+
+                    ui.slider(
+                        "Starburst Scale",
+                        0.0,
+                        5.0,
+                        &mut self.params_uniform.data.starburst_scale,
+                    );
+
+                    ui.slider(
+                        "Light Intensity",
+                        0.0,
+                        5.0,
+                        &mut self.params_uniform.data.intensity,
+                    );
+
+                    ui.separator();
+
                     let max_bounces = (self.lenses_uniform.data.bounce_count - 1) as i32;
 
                     ui.slider(
@@ -1782,12 +1911,6 @@ impl State {
                         -1,
                         max_bounces,
                         &mut self.params_uniform.data.bid,
-                    );
-                    ui.slider(
-                        "Ray Intensity",
-                        0.0,
-                        5.0,
-                        &mut self.params_uniform.data.intensity,
                     );
                     ui.slider(
                         "Wavelength",

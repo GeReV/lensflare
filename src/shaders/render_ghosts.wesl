@@ -1,23 +1,14 @@
-import super::utils::PI;
+import super::utils::{PI, Params};
 import super::camera::camera;
-import super::lenses::{Ray, trace, system};
+import super::lenses_types::Ray;
+import super::lenses::{trace, system};
 import super::colors::wavelength_to_rgb;
-
-struct Params {
-    debug_wireframe_alpha: f32,
-    debug_interpolate: f32,
-    ray_dir: vec3f,
-    bid: i32,
-    intensity: f32,
-    lambda: f32,
-    wireframe: u32,
-}
 
 @group(2) @binding(0)
 var<uniform> params: Params;
 
-@group(2) @binding(1) var ghost_sampler : sampler;
-@group(2) @binding(2) var ghost_texture : texture_2d<f32>;
+@group(3) @binding(0) var ghost_sampler : sampler;
+@group(3) @binding(1) var ghost_texture : texture_2d<f32>;
 
 //fn sample_grid_limits(bid: i32, ray_dir: vec3f) -> vec4f {
 //    let limits = grid_limits[bid];

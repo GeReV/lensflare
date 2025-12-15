@@ -22,6 +22,7 @@ use wgpu::{
     RenderPassColorAttachment, RenderPassDescriptor, RenderPipelineDescriptor, StoreOp, Texture,
     TextureDimension, TextureFormat, TextureUsages, VertexState,
 };
+use crate::utils::wavelengths_to_colors;
 
 pub fn draw_ghost_polygon(
     device: &Device,
@@ -372,26 +373,20 @@ pub fn fft_ghost_gpu(
     aperture_texture: &Texture,
     delta: f32,
     z: f32,
-    wavelengths: impl IntoIterator<Item = f32>,
+    wavelengths: &[f32],
 ) -> anyhow::Result<Texture> {
     let width = aperture_texture.width();
     let height = aperture_texture.height();
 
     let size = width as usize;
 
-    let wavelengths = wavelengths.into_iter().collect_vec();
-
     let min_storage_buffer_offset_alignment =
         device.limits().min_storage_buffer_offset_alignment as usize;
 
-    let colors = wavelengths
+    let colors = wavelengths_to_colors(wavelengths)
         .iter()
-        .flat_map(|&x| {
+        .flat_map(|&color| {
             let mut bytes = vec![0u8; min_storage_buffer_offset_alignment];
-
-            let color = wavelength_to_rgb(x)
-                .clamp(Vec3::ZERO, Vec3::ONE)
-                .extend(1.0);
 
             bytes[..size_of_val(&color)].copy_from_slice(bytemuck::cast_slice(&[color]));
 
@@ -406,7 +401,7 @@ pub fn fft_ghost_gpu(
     });
 
     let angular_spectrum_parameters =
-        generate_angular_spectrum_parameters_buffer(delta, z, &wavelengths)
+        generate_angular_spectrum_parameters_buffer(delta, z, wavelengths)
             .iter()
             .flat_map(|params| {
                 let mut bytes = vec![0u8; min_storage_buffer_offset_alignment];
