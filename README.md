@@ -176,3 +176,43 @@ something stick.
 
 I haven't decided yet what to take as the next step. Some of my options are implementing the ghost generation on GPU,
 improving color management (i.e., adding HDR support and tone mapping), or adding the light burst at the light's origin.
+
+### 2025-12-15
+
+It took me about 3 days to get the FFT working on the GPU. 
+
+I had initially implemented it as compute shaders using storage buffers, but those proved to be harder to debug
+with Nsight than regular textures, since I couldn't find a way to visually inspect the contents of the buffers.
+This might be just an issue with my proficiency with Nsight, but I still ended up refactoring things to work with
+textures instead.
+
+Working with compute shaders on textures proved slightly more difficult and involved. 
+The graphics API ([wgpu](https://wgpu.rs)), or possibly the GPU itself, have some limitations on the formats of textures
+that can be used and sampled from, and additional limitations on which formats can be used as either read-only,
+write-only, or read-write, whereas storage buffers can be read-write and have arbitrary formats.
+
+As a result, the code has to keep more temporary textures that are used to store intermediate results. 
+They are often used as ping-pong buffers (i.e., one texture used as a source and another as a destination,
+swapping between them for the next draw).
+
+My initial results on GPU, of rendering the ghost texture (that is, excluding building the commands sent to the GPU), 
+took 1.67 milliseconds.
+
+Shortly after, I realized that I can just reuse the same texture of the aperture's FFT, which shaved off almost an
+entire millisecond, ending up at 0.74 milliseconds for the rendering.
+
+My next step was to add the starburst effect at the light's origin. Fortunately, this part is mostly straightforward, 
+reusing most of the code built for the ghost texture generation.
+
+![](screenshots/wip11.png)
+
+The resulting texture still has some artifacts, which I will try to fix next. 
+
+The paper does some additional filtering on the texture, which they don't explain in detail. It is also mentioned in 
+[a blog post by Jean-Philippe Grenier](https://www.jpgrenier.org/lensflare.html), but his explanation 
+isn't very clear to me.  
+I haven't looked at his code yet, as I'm still trying to avoid existing implementations, but I also couldn't get ChatGPT
+to quite clarify it as well, so maybe it's worth a peek.
+
+His implementation also gives some nicer results than I'm getting at the moment, so I guess I'll have to play 
+around with my parameters to see if I can get something closer to his results.
