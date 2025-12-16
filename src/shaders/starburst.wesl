@@ -1,3 +1,4 @@
+import package::utils::{PI, rotation_mat2};
 import constants::{base_size, min_size};
 
 @group(0) @binding(0) var tex_sampler : sampler;
@@ -9,7 +10,6 @@ var<storage, read> colors: array<vec4f>;
 struct VertexOutput {
   @builtin(position) position : vec4f,
   @location(0) uv : vec2f,
-  @location(1) color: vec4f,
 }
 
 @vertex
@@ -26,25 +26,76 @@ fn vs_main(@builtin(vertex_index) vertex_index : u32, @builtin(instance_index) i
     vec2(0.0, 0.0),
   );
 
-  let color_count = arrayLength(&colors);
-
-  let scale = mix(min_size, 1, f32(instance_index) / f32(color_count - 1)) * f32(base_size);
-  let uv_scale = 1 / scale;
-
   var output: VertexOutput;
 
-  let out_uv = ((uv[vertex_index] - 0.5) * uv_scale) + 0.5;
+  let out_uv = uv[vertex_index];
 
   output.position = vec4(pos[vertex_index], 0.0, 1.0);
   output.uv = out_uv;
-  output.color = colors[instance_index];
 
   return output;
 }
 
 @fragment
-fn fs_main(input: VertexOutput) -> @location(0) vec4f {
-  var p = textureSample(texture, tex_sampler, input.uv);
+fn starburst(input: VertexOutput) -> @location(0) vec4f {
+  var out = vec4f();
 
-  return vec4f(p.r) * input.color;
+  let d = length(input.uv * 2 - 1);
+
+  let uv = input.uv - 0.5;
+
+  let clamped = f32(d < 1);
+
+  let count = arrayLength(&colors);
+  for(var i: u32 = 0; i < count; i++) {
+    let scale = mix(0.5, 1, f32(i) / f32(count - 1));
+
+    let uv_scale = 1 / scale;
+    let scaled_uv = (uv * uv_scale) + 0.5;
+//    let uv = input.uv;
+
+    let p = textureSample(texture, tex_sampler, scaled_uv);
+
+    let l = length(p.xy);
+    let starburst = l * l * mix(1.0, 0, d) * clamped;
+
+    let color_mix = mix(vec4f(1), colors[i], 0.75);
+    out += vec4f(starburst) * 0.001 * color_mix;
+  }
+
+  out /= f32(count);
+
+  return out;
+}
+
+@fragment
+fn starburst_filter(input: VertexOutput) -> @location(0) vec4f {
+  // Spiral filter as used by https://www.jpgrenier.org/lensflare.html
+  // This basically just copies the texture multiple times in a small outwards spiral,
+  // creating a blur effect.
+  var out = vec4f();
+
+  let d = length(input.uv * 2 - 1);
+
+  let uv = input.uv - 0.5;
+
+  const rotation = 0.03 * PI;
+
+  let count = arrayLength(&colors);
+  for(var i: u32 = 0; i < count; i++) {
+    let t = f32(i) / f32(count - 1);
+    let a = 2 * PI * t * 2;
+
+    let spiral = vec2f(cos(a), sin(a)) * 0.002 * t;
+    let rot = rotation_mat2(t * 0.05 + rotation);
+    let rotated_uv = rot * (uv + spiral);
+
+    let starburst = textureSample(texture, tex_sampler, rotated_uv + 0.5);
+
+    out += starburst;
+  }
+
+  out /= f32(count);
+
+  return out;
 }

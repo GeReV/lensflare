@@ -1,24 +1,24 @@
 use crate::fft::wgpu::{
-    ComplexNormalizePipeline, ComputeFftPipeline, CopyToComplexPipeline,
+    ComputeFftPipeline, CopyToComplexPipeline,
     TextureMultiplyConstPipeline,
 };
 use crate::shaders::create_shader;
 use crate::texture::TextureExt;
-use crate::utils::{wavelengths_to_colors, ADDITIVE_BLEND};
-use glam::Vec4;
+use crate::utils::wavelengths_to_colors;
 use itertools::Itertools;
 use wesl::{StandardResolver, Wesl};
 use wgpu::util::{BufferInitDescriptor, DeviceExt, TextureBlitter};
 use wgpu::wgt::{SamplerDescriptor, TextureDescriptor};
 use wgpu::{
     AddressMode, BindGroupDescriptor, BindGroupEntry, BindGroupLayout, BindGroupLayoutEntry,
-    BindingResource, BindingType, Buffer, BufferBindingType, BufferUsages, Color, ColorTargetState,
-    ColorWrites, CommandEncoder, CommandEncoderDescriptor, Device, Extent3d, Face, FilterMode,
-    FragmentState, FrontFace, LoadOp, MultisampleState, Operations, PipelineCompilationOptions,
-    PipelineLayoutDescriptor, PolygonMode, PrimitiveState, PrimitiveTopology, Queue,
-    RenderPassColorAttachment, RenderPassDescriptor, RenderPipeline, RenderPipelineDescriptor,
-    SamplerBindingType, ShaderStages, StoreOp, Texture, TextureDimension, TextureFormat,
-    TextureSampleType, TextureUsages, TextureView, TextureViewDimension, VertexState,
+    BindingResource, BindingType, BlendState, Buffer, BufferBindingType, BufferUsages, Color,
+    ColorTargetState, ColorWrites, CommandEncoder, CommandEncoderDescriptor, Device, Extent3d,
+    Face, FilterMode, FragmentState, FrontFace, LoadOp, MultisampleState, Operations,
+    PipelineCompilationOptions, PipelineLayoutDescriptor, PolygonMode, PrimitiveState,
+    PrimitiveTopology, Queue, RenderPassColorAttachment, RenderPassDescriptor, RenderPipeline,
+    RenderPipelineDescriptor, SamplerBindingType, ShaderStages, StoreOp, Texture, TextureDimension,
+    TextureFormat, TextureSampleType, TextureUsages, TextureView, TextureViewDimension,
+    VertexState,
 };
 
 pub fn create_starburst_gpu(
@@ -26,12 +26,15 @@ pub fn create_starburst_gpu(
     queue: &Queue,
     compiler: &mut Wesl<StandardResolver>,
     aperture_texture: &Texture,
+    dst_texture: &Texture,
     wavelengths: &[f32],
-) -> anyhow::Result<Texture> {
+) -> anyhow::Result<()> {
     let width = aperture_texture.width();
     let height = aperture_texture.height();
 
     let size = width as usize;
+
+    let texture_view = dst_texture.create_view_default();
 
     let min_storage_buffer_offset_alignment =
         device.limits().min_storage_buffer_offset_alignment as usize;
@@ -52,23 +55,6 @@ pub fn create_starburst_gpu(
         contents: &colors,
         usage: BufferUsages::STORAGE,
     });
-
-    let texture = device.create_texture(&TextureDescriptor {
-        label: Some("Starburst Texture"),
-        size: Extent3d {
-            width,
-            height,
-            depth_or_array_layers: 1,
-        },
-        usage: TextureUsages::TEXTURE_BINDING | TextureUsages::RENDER_ATTACHMENT,
-        dimension: TextureDimension::D2,
-        format: TextureFormat::Rgba16Float,
-        sample_count: 1,
-        mip_level_count: 1,
-        view_formats: &[],
-    });
-
-    let texture_view = texture.create_view_default();
 
     let temp_textures_rg32float = (0..2)
         .map(|i| {
@@ -96,25 +82,7 @@ pub fn create_starburst_gpu(
         .collect_vec()
         .into_boxed_slice();
 
-    let temp_texture_r32float = device.create_texture(&TextureDescriptor {
-        label: Some("Starburst FFT Temporary R32Float Texture"),
-        size: Extent3d {
-            width,
-            height,
-            depth_or_array_layers: 1,
-        },
-        usage: TextureUsages::TEXTURE_BINDING
-            | TextureUsages::RENDER_ATTACHMENT
-            | TextureUsages::STORAGE_BINDING,
-        dimension: TextureDimension::D2,
-        format: TextureFormat::R32Float,
-        sample_count: 1,
-        mip_level_count: 1,
-        view_formats: &[],
-    });
-    let temp_texture_r32float_view = temp_texture_r32float.create_view_default();
-
-    let temp_texture_r16float = device.create_texture(&TextureDescriptor {
+    let temp_texture_rg16float = device.create_texture(&TextureDescriptor {
         label: Some("Starburst FFT Temporary R16Float Texture"),
         size: Extent3d {
             width,
@@ -123,25 +91,39 @@ pub fn create_starburst_gpu(
         },
         usage: TextureUsages::TEXTURE_BINDING | TextureUsages::RENDER_ATTACHMENT,
         dimension: TextureDimension::D2,
-        format: TextureFormat::R16Float,
+        format: TextureFormat::Rg16Float,
         sample_count: 1,
         mip_level_count: 1,
         view_formats: &[],
     });
-    let temp_texture_r16float_view = temp_texture_r16float.create_view_default();
+    let temp_texture_rg16float_view = temp_texture_rg16float.create_view_default();
+
+    let temp_texture = device.create_texture(&TextureDescriptor {
+        label: Some("Starburst Prefilter Texture"),
+        size: Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+        usage: dst_texture.usage(),
+        format: dst_texture.format(),
+        dimension: TextureDimension::D2,
+        sample_count: 1,
+        mip_level_count: 1,
+        view_formats: &[],
+    });
+    let temp_texture_view = temp_texture.create_view_default();
 
     let copy_to_complex_pipeline = CopyToComplexPipeline::new(device, compiler, size)?;
 
     let fft_pipeline = ComputeFftPipeline::new(device, compiler, size)?;
 
-    let normalize_pipeline = ComplexNormalizePipeline::new(device, compiler)?;
-
-    let texture_multiply_const =
-        TextureMultiplyConstPipeline::new(device, compiler, TextureFormat::Rg32Float, size as f32)?;
+    let texture_multiply_const_pipeline =
+        TextureMultiplyConstPipeline::new(device, compiler, TextureFormat::Rg32Float, (size * size) as f32)?;
 
     let starburst_pipeline = StarburstPipeline::new(device, compiler)?;
 
-    let texture_blitter = TextureBlitter::new(device, TextureFormat::R16Float);
+    let texture_blitter = TextureBlitter::new(device, TextureFormat::Rg16Float);
 
     let mut command_encoder = device.create_command_encoder(&CommandEncoderDescriptor {
         label: Some("Starburst Command Encoder"),
@@ -162,44 +144,46 @@ pub fn create_starburst_gpu(
         &temp_texture_rg32float_views[1],
     );
 
-    texture_multiply_const.process(
+    texture_multiply_const_pipeline.process(
         device,
         &mut command_encoder,
         &temp_texture_rg32float_views[1],
         &temp_texture_rg32float_views[0],
     );
 
-    normalize_pipeline.normalize(
-        device,
-        &mut command_encoder,
-        &temp_texture_rg32float_views[0],
-        &temp_texture_r32float_view,
-    );
-
     texture_blitter.copy(
         device,
         &mut command_encoder,
-        &temp_texture_r32float_view,
-        &temp_texture_r16float_view,
+        &temp_texture_rg32float_views[0],
+        &temp_texture_rg16float_view,
     );
 
     starburst_pipeline.render(
         device,
         &mut command_encoder,
-        &temp_texture_r16float_view,
+        &temp_texture_rg16float_view,
+        &temp_texture_view,
+        &colors_buffer,
+    );
+
+    starburst_pipeline.filter(
+        device,
+        &mut command_encoder,
+        &temp_texture_view,
         &texture_view,
         &colors_buffer,
     );
 
     queue.submit(Some(command_encoder.finish()));
 
-    Ok(texture)
+    Ok(())
 }
 
 struct StarburstPipeline {
-    pipeline: RenderPipeline,
+    starburst_pipeline: RenderPipeline,
     texture_bind_group_layout: BindGroupLayout,
     colors_bind_group_layout: BindGroupLayout,
+    starburst_filter_pipeline: RenderPipeline,
 }
 
 impl StarburstPipeline {
@@ -241,7 +225,7 @@ impl StarburstPipeline {
                 label: Some("Starburst Colors Bind Group Layout"),
                 entries: &[BindGroupLayoutEntry {
                     binding: 0,
-                    visibility: ShaderStages::VERTEX,
+                    visibility: ShaderStages::VERTEX_FRAGMENT,
                     ty: BindingType::Buffer {
                         ty: BufferBindingType::Storage { read_only: true },
                         has_dynamic_offset: false,
@@ -257,7 +241,7 @@ impl StarburstPipeline {
             push_constant_ranges: &[],
         });
 
-        let pipeline = device.create_render_pipeline(&RenderPipelineDescriptor {
+        let pipeline_descriptor = RenderPipelineDescriptor {
             label: Some("Starburst Render Pipeline"),
             layout: Some(&pipeline_layout),
             vertex: VertexState {
@@ -268,10 +252,10 @@ impl StarburstPipeline {
             },
             fragment: Some(FragmentState {
                 module: &module,
-                entry_point: Some("fs_main"),
+                entry_point: Some("starburst"),
                 targets: &[Some(ColorTargetState {
                     format: TextureFormat::Rgba16Float,
-                    blend: Some(ADDITIVE_BLEND),
+                    blend: Some(BlendState::REPLACE),
                     write_mask: ColorWrites::ALL,
                 })],
                 compilation_options: PipelineCompilationOptions::default(),
@@ -296,10 +280,24 @@ impl StarburstPipeline {
             },
             multiview: None,
             cache: None,
-        });
+        };
+
+        let starburst_pipeline = device.create_render_pipeline(&pipeline_descriptor);
+
+        let pipeline_descriptor = RenderPipelineDescriptor {
+            label: Some("Starburst Filter Pipeline"),
+            fragment: Some(FragmentState {
+                entry_point: Some("starburst_filter"),
+                ..pipeline_descriptor.fragment.unwrap()
+            }),
+            ..pipeline_descriptor
+        };
+
+        let starburst_filter_pipeline = device.create_render_pipeline(&pipeline_descriptor);
 
         Ok(Self {
-            pipeline,
+            starburst_pipeline,
+            starburst_filter_pipeline,
             texture_bind_group_layout,
             colors_bind_group_layout,
         })
@@ -309,6 +307,29 @@ impl StarburstPipeline {
         &self,
         device: &Device,
         command_encoder: &mut CommandEncoder,
+        src: &TextureView,
+        dst: &TextureView,
+        colors: &Buffer,
+    ) {
+        self.process(device, command_encoder, &self.starburst_pipeline, src, dst, colors);
+    }
+
+    pub fn filter(
+        &self,
+        device: &Device,
+        command_encoder: &mut CommandEncoder,
+        src: &TextureView,
+        dst: &TextureView,
+        colors: &Buffer,
+    ) {
+        self.process(device, command_encoder, &self.starburst_filter_pipeline, src, dst, colors);
+    }
+
+    pub fn process(
+        &self,
+        device: &Device,
+        command_encoder: &mut CommandEncoder,
+        pipeline: &RenderPipeline,
         src: &TextureView,
         dst: &TextureView,
         colors: &Buffer,
@@ -376,13 +397,11 @@ impl StarburstPipeline {
             }],
         });
 
-        render_pass.set_pipeline(&self.pipeline);
+        render_pass.set_pipeline(pipeline);
 
         render_pass.set_bind_group(0, &texture_bind_group, &[]);
         render_pass.set_bind_group(1, &colors_bind_group, &[]);
 
-        let instance_count = colors.size() as usize / size_of::<Vec4>();
-
-        render_pass.draw(0..3, 0..instance_count as u32);
+        render_pass.draw(0..3, 0..1);
     }
 }

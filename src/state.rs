@@ -27,19 +27,7 @@ use std::time::{Duration, Instant};
 use wesl::{StandardResolver, Wesl};
 use wgpu::util::{BufferInitDescriptor, DeviceExt};
 use wgpu::wgt::{SamplerDescriptor, TextureDescriptor};
-use wgpu::{
-    AddressMode, Backends, BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayout,
-    BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingResource, BindingType, BlendState,
-    Buffer, BufferAddress, BufferBindingType, BufferDescriptor, BufferUsages, Color,
-    ColorTargetState, ColorWrites, CommandEncoderDescriptor, Device, DeviceDescriptor, Extent3d,
-    Face, Features, FilterMode, FragmentState, FrontFace, IndexFormat, Instance,
-    InstanceDescriptor, Label, LoadOp, MultisampleState, Operations, PipelineCompilationOptions,
-    PipelineLayoutDescriptor, PolygonMode, PowerPreference, PresentMode, PrimitiveState,
-    PrimitiveTopology, Queue, RenderPass, RenderPassColorAttachment, RenderPassDescriptor,
-    RenderPipeline, RenderPipelineDescriptor, RequestAdapterOptions, SamplerBindingType,
-    ShaderModule, ShaderStages, StoreOp, Surface, SurfaceConfiguration, Texture, TextureDimension,
-    TextureFormat, TextureSampleType, TextureUsages, TextureViewDimension, Trace, VertexState,
-};
+use wgpu::{AddressMode, Backends, BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayout, BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingResource, BindingType, BlendState, Buffer, BufferAddress, BufferBindingType, BufferDescriptor, BufferUsages, Color, ColorTargetState, ColorWrites, CommandEncoderDescriptor, Device, DeviceDescriptor, Extent3d, Face, Features, FilterMode, FragmentState, FrontFace, IndexFormat, Instance, InstanceDescriptor, Label, LoadOp, MultisampleState, Operations, PipelineCompilationOptions, PipelineLayoutDescriptor, PolygonMode, PowerPreference, PresentMode, PrimitiveState, PrimitiveTopology, Queue, RenderPass, RenderPassColorAttachment, RenderPassDescriptor, RenderPipeline, RenderPipelineDescriptor, RequestAdapterOptions, Sampler, SamplerBindingType, ShaderModule, ShaderStages, StoreOp, Surface, SurfaceConfiguration, Texture, TextureDimension, TextureFormat, TextureSampleType, TextureUsages, TextureViewDimension, Trace, VertexState};
 use winit::event::{MouseButton, MouseScrollDelta};
 use winit::event_loop::ActiveEventLoop;
 use winit::keyboard::KeyCode;
@@ -75,6 +63,8 @@ pub struct State {
 
     render_target: Texture,
 
+    texture_sampler: Sampler,
+
     camera: Camera,
     projection: Projection,
     pub(crate) camera_controller: CameraController,
@@ -99,18 +89,24 @@ pub struct State {
     grid_limits_uniform: Uniform<GridLimitsUniform>,
     params_uniform: Uniform<ParamsUniform>,
 
+    texture_bind_group_layout_id: Id<BindGroupLayout>,
+
     starburst_texture_bind_group_id: Id<BindGroup>,
     ghost_texture_bind_group_id: Id<BindGroup>,
     fullscreen_bind_group_id: Id<BindGroup>,
 
     pub(crate) light_pos: Vec4,
 
+    wavelengths_nm: Vec<f32>,
+
     grids: Grids,
     bounces_grid_log2_sizes: Vec<u32>,
     grids_vertex_buffer: Buffer,
     grids_index_buffer: Buffer,
 
+    aperture_texture: Texture,
     ghost_texture: Texture,
+    starburst_texture: Texture,
 
     static_lines_vertices: Vec<ColoredVertex>,
     static_lines_vertex_buffer: Buffer,
@@ -122,10 +118,8 @@ pub struct State {
 
     debug_mode: bool,
     draw_axes: bool,
-    pub aperture_texture: Texture,
 
     frame: u64,
-    pub texture_bind_group_layout_id: Id<BindGroupLayout>,
 }
 
 const DEBUG_RAY_COUNT: isize = 48 + 1;
@@ -430,14 +424,30 @@ impl State {
 
         let ghost_texture_view = ghost_texture.create_view_default();
 
-        let starburst_texture = create_starburst_gpu(
+        let starburst_texture = device.create_texture(&TextureDescriptor {
+            label: Some("Starburst Texture"),
+            size: Extent3d {
+                width: 1024,
+                height: 1024,
+                depth_or_array_layers: 1,
+            },
+            usage: TextureUsages::TEXTURE_BINDING | TextureUsages::RENDER_ATTACHMENT,
+            dimension: TextureDimension::D2,
+            format: TextureFormat::Rgba16Float,
+            sample_count: 1,
+            mip_level_count: 1,
+            view_formats: &[],
+        });
+        let starburst_texture_view = starburst_texture.create_view_default();
+
+        create_starburst_gpu(
             &device,
             &queue,
             &mut compiler,
             &aperture_texture,
+            &starburst_texture,
             &wavelengths_nm,
         )?;
-        let starburst_texture_view = starburst_texture.create_view_default();
 
         let texture_sampler = device.create_sampler(&SamplerDescriptor {
             label: Some("Default Texture Sampler"),
@@ -605,6 +615,7 @@ impl State {
         let hot_reload_shaders = vec![
             HotReloadShader::new("src/shaders/render_ghosts.wesl"),
             HotReloadShader::new("src/shaders/render_starburst.wesl"),
+            HotReloadShader::new("src/shaders/starburst.wesl"),
             HotReloadShader::new("src/shaders/fullscreen.wesl"),
         ];
 
@@ -686,6 +697,8 @@ impl State {
             compiler,
             hot_reload_shaders,
 
+            texture_sampler,
+
             camera,
             projection,
             camera_controller,
@@ -712,6 +725,9 @@ impl State {
 
             aperture_texture,
             ghost_texture,
+            starburst_texture,
+
+            wavelengths_nm,
 
             static_lines_vertices,
             static_lines_vertex_buffer,
@@ -1179,6 +1195,23 @@ impl State {
                         self.render_pipelines
                             .insert(PipelineId::Starburst, render_pipeline);
                     }
+                    "starburst" => {
+                        match create_starburst_gpu(
+                            &self.device,
+                            &self.queue,
+                            &mut self.compiler,
+                            &self.aperture_texture,
+                            &self.starburst_texture,
+                            &self.wavelengths_nm,
+                        ) {
+                            Ok(_) => {
+                                shader.shader_last_error = None;
+                            }
+                            Err(err) => {
+                                shader.shader_last_error = Some(err.to_string());
+                            }
+                        };
+                    }
                     "fullscreen" => {
                         let fullscreen_bind_group_layout =
                             &self.bind_group_layouts[&self.texture_bind_group_layout_id];
@@ -1594,13 +1627,19 @@ impl State {
                     selected_bid as u32..(selected_bid + 1) as u32
                 };
 
+                let bounces_and_grid_sizes: Vec<(u32, usize)> = bounce_range
+                    .map(|bid| {
+                        let grid_size = self.bounces_grid_log2_sizes[bid as usize] as usize;
+                        let grid_size = 32;
+
+                        (bid, grid_size)
+                    })
+                    .collect::<Vec<_>>();
+
                 if let Some(render_pipeline) = self.render_pipelines.get(&PipelineId::Ghosts) {
                     render_pass.set_pipeline(render_pipeline);
 
-                    for bid in bounce_range.clone() {
-                        let grid_size = self.bounces_grid_log2_sizes[bid as usize] as usize;
-                        let grid_size = 16;
-
+                    for &(bid, grid_size) in &bounces_and_grid_sizes {
                         let (vertex_range, index_range) =
                             self.grids.get_grid_size_index_ranges(grid_size).unwrap();
 
@@ -1615,10 +1654,7 @@ impl State {
                 // if let Some(render_pipeline) = self.render_pipelines.get(&PipelineId::Wireframe) {
                 //     render_pass.set_pipeline(render_pipeline);
                 //
-                //     for bid in bounce_range.clone() {
-                //         let grid_size = self.bounces_grid_log2_sizes[bid as usize] as usize;
-                //         let grid_size = 32;
-                //
+                //     for &(bid, grid_size) in &bounces_and_grid_sizes {
                 //         let (vertex_range, index_range) =
                 //             self.grids.get_grid_size_index_ranges(grid_size).unwrap();
                 //
@@ -1769,6 +1805,7 @@ impl State {
                 &self.queue,
                 &mut self.compiler,
                 &self.aperture_texture,
+                &self.starburst_texture,
                 &wavelengths_nm,
             )?;
         }

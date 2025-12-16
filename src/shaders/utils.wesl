@@ -10,3 +10,9 @@ struct Params {
     lambda: f32,
     wireframe: u32,
 }
+
+fn rotation_mat2(theta: f32) -> mat2x2f {
+    let c = cos(theta);
+    let s = sin(theta);
+    return mat2x2f(c, -s, s, c);
+}
