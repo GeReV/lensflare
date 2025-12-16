@@ -191,10 +191,10 @@ fn trace(
 
        // record texture coord. or max. rel. radius
        if f.flat_surface == 0 {
-        r.tex.z = max(r.tex.z, length(i.pos.xy) / f.sa);
+        r.tex.z = max(r.tex.z, length(i.pos.xy) / f.sa_half);
        } else if t == system.aperture_index {
         // iris aperture plane
-        let v = i.pos.xy / system.interfaces[system.aperture_index].sa;
+        let v = i.pos.xy / system.interfaces[system.aperture_index].sa_half;
         r.tex.x = v.x;
         r.tex.y = v.y;
        }

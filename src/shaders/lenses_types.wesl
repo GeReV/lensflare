@@ -21,7 +21,7 @@ struct LensInterface {
     center: vec3f, // center of sphere / plane on z-axis
     n: vec3f, // refractive indices (n0, n1, n2)
     radius: f32, // radius of sphere/plane
-    sa: f32, // nominal radius (from optical axis)
+    sa_half: f32, // nominal radius (from optical axis)
     d0: f32, // coating thickness = lambdaAR / 4 / n1
     flat_surface: u32, // is this interface a plane?
 }

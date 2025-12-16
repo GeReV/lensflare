@@ -119,6 +119,8 @@ fn vs_main(
 
     let lambda = in.instance_index % 3;
 
+    let last_lens = system.interfaces[system.interface_count - 1];
+
     let ray_dir = normalize(params.ray_dir);
 
     var bid = params.bid;
@@ -127,11 +129,11 @@ fn vs_main(
     }
 
     let normalized_pos = in.position.xy * 2 - 1;
+    let sa = last_lens.sa_half;
 
     var in_pos: vec2f;
     in_pos = normalized_pos;
 
-    let sa = system.interfaces[0].sa;
 //    in_pos *= sa;
 
     // Set lens entrance center to the center of the lens with an offset relative to the ray's position and the lens' radius,
@@ -153,8 +155,6 @@ fn vs_main(
 
     out.position = in.position;
     out.tex = out_ray.tex;
-
-    let last_lens = system.interfaces[system.interface_count - 1];
 
     var out_pos = out_ray.pos;
     if out_pos.z == 1 {
@@ -206,8 +206,6 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {
     let normalized_pos = in.position.xy * 2 - 1;
 
     let alpha = in.tex.a;
-
-    let ray_dir = normalize(params.ray_dir);
 
     let uv = (in.tex.xy / f_stop + 0.5);
     let tex = textureSample(ghost_texture, ghost_sampler, uv);
