@@ -48,3 +48,12 @@ where
         self.get(index).unwrap()
     }
 }
+
+impl<T> std::ops::IndexMut<&Id<T>> for Registry<T>
+where
+    T: Hash + Eq,
+{
+    fn index_mut(&mut self, index: &Id<T>) -> &mut Self::Output {
+        self.get_mut(index).unwrap()
+    }
+}
