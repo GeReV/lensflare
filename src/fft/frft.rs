@@ -2,7 +2,7 @@ use crate::fft::cpu::fft_stockham;
 use crate::fft::utils::{elementwise_multiply, transpose_blocks, transpose_chunk};
 use itertools::Itertools;
 use num_complex::{Complex32, ComplexFloat};
-use rayon::iter::{IndexedParallelIterator, IntoParallelIterator, IntoParallelRefMutIterator, ParallelIterator};
+use rayon::iter::{IntoParallelIterator, IntoParallelRefMutIterator, ParallelIterator};
 use rayon::prelude::ParallelSliceMut;
 use std::f32::consts::PI;
 

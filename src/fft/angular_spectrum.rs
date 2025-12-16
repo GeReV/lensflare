@@ -1,15 +1,7 @@
 use crate::fft::cpu::{fft2d, ifft2d};
 use crate::fft::utils::elementwise_multiply;
-use crate::fft::wgpu::{ComputeFftPipeline, GenerateFrequenciesPipeline, MultiplyComplexPipeline};
-use glam::UVec2;
 use num_complex::{Complex, Complex32};
 use rayon::prelude::*;
-use wesl::{StandardResolver, Wesl};
-use wgpu::wgt::TextureDescriptor;
-use wgpu::{
-    Buffer, CommandEncoder, Device, Extent3d, Texture, TextureDimension, TextureFormat,
-    TextureUsages,
-};
 
 pub(crate) fn generate_frequency_grid(
     size: usize,
