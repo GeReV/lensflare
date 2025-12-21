@@ -1,8 +1,9 @@
 import super::utils::{PI, Params};
 import super::camera::camera;
 import super::lenses_types::Ray;
-import super::lenses::{trace, system};
+import super::lenses::{trace, system, test_sphere};
 import super::colors::wavelength_to_rgb;
+import constants::{workgroup_size_x, workgroup_size_y, workgroup_size_z, GRID_SIZE};
 
 @group(2) @binding(0)
 var<uniform> params: Params;
@@ -10,26 +11,14 @@ var<uniform> params: Params;
 @group(3) @binding(0) var ghost_sampler : sampler;
 @group(3) @binding(1) var ghost_texture : texture_2d<f32>;
 
-//fn sample_grid_limits(bid: i32, ray_dir: vec3f) -> vec4f {
-//    let limits = grid_limits[bid];
-//
-//    let size = f32(GRID_LIMITS_SIZE);
-//    let xy = (ray_dir.xy + vec2f(0.5)) * (size - 1);
-//    let fraction = fract(xy);
-//    let index = u32(xy.y) * GRID_LIMITS_SIZE + u32(xy.x);
-//
-////    let a = mix(limits[index], limits[index + 1], fraction.x);
-////    let b = mix(limits[index + GRID_LIMITS_SIZE], limits[index + GRID_LIMITS_SIZE + 1], fraction.x);
-////
-////    return mix(a, b, fraction.y);
-//
-//    return limits[index];
-//}
+@if (compute)
+@group(4) @binding(0) var<storage, read_write> rays: array<Ray>;
+@else
+@group(4) @binding(0) var<storage, read> rays: array<Ray>;
 
 struct VertexInput {
     @builtin(vertex_index) vertex_index: u32,
     @builtin(instance_index) instance_index: u32,
-    @location(0) position: vec3f,
 }
 
 struct VertexOutput {
@@ -37,182 +26,224 @@ struct VertexOutput {
     @location(0) position: vec3f,
     @location(1) color: vec3f,
     @location(2) tex: vec4f,
-    @location(3) scale: f32,
-//    @location(3) barycentric_coord: vec3f,
-//    @location(1) tex_coords: vec2<f32>,
+    @location(3) barycentric_coord: vec3f,
+    @location(4) tex_coords: vec2f,
+    @location(5) area_ratio: f32,
 }
 
-fn sd_hexagon(in: vec2f, r: f32) -> f32 {
-    const k = vec3f(-0.866025404,0.5,0.577350269);
+const SPREAD: f32 = 1.0;
 
-    var p = in;
-    p = abs(p);
-    p -= 2.0 * min(dot(k.xy,p),0.0) * k.xy;
-    p -= vec2f(clamp(p.x, -k.z*r, k.z*r), r);
-
-    return length(p)*sign(p.y);
-}
-
-fn edge_factor(bary: vec3f, thickness: f32) -> f32 {
-  let d = fwidth(bary);
-  let a3 = smoothstep(vec3f(0.0), d * thickness, bary);
-  return min(min(a3.x, a3.y), a3.z);
+fn edge_factor(x: vec3f) -> f32 {
+  let d = fwidth(x);
+  let f = smoothstep(vec3f(), d, x);
+  return min(min(f.x, f.y), f.z);
 }
 
 // A quad ABCD's area is calculated as the area of the two triangles making it.
 // Each triangle's area is calculated as half of the magnitude of cross-product of its edges.
 // The magnitude of a cross-product between two vectors is the area of the parallelogram created by AB and AC.
 // i.e. for triangle ABC, |ABxAC| / 2.
-fn quad_area(a: vec2f, b: vec2f, c: vec2f, d: vec2f) -> f32 {
-    let ab = length(a - b);
-    let ac = length(a - c);
-    let bd = length(b - d);
-    let cd = length(c - d);
+fn quad_area(a: vec3f, b: vec3f, c: vec3f, d: vec3f) -> f32 {
+    let ab = a - b;
+    let ac = a - c;
+    let bd = b - d;
+    let cd = c - d;
 
     return (length(cross(ab, ac)) + length(cross(bd, cd))) * 0.5;
 }
 
-fn calculate_grid_start_index(vertex_index: u32) -> u32 {
-    var i: u32 = 0;
-    var prev_start_index: u32 = 0;
+fn calculate_grid_cell_area_ratio(vertex_index: u32) -> f32 {
+    // The 9 vertices around and including vertex_index.
+    let a = rays[vertex_index - GRID_SIZE - 1];
+    let b = rays[vertex_index - GRID_SIZE + 0];
+    let c = rays[vertex_index - GRID_SIZE + 1];
+    let d = rays[vertex_index - 1];
+    let e = rays[vertex_index + 0];
+    let f = rays[vertex_index + 1];
+    let g = rays[vertex_index + GRID_SIZE - 1];
+    let h = rays[vertex_index + GRID_SIZE + 0];
+    let i = rays[vertex_index + GRID_SIZE + 1];
 
-    for (; i < 32; i += 1) {
-        let grid_size = u32(1 << i) + 1;
+    var base_cell_width = SPREAD / f32(GRID_SIZE - 1);
+    var base_cell_height = base_cell_width;
 
-        let start_index = grid_size * grid_size;
+    let A = quad_area(a.pos, b.pos, d.pos, e.pos);
+    let B = quad_area(b.pos, c.pos, e.pos, f.pos);
+    let C = quad_area(d.pos, e.pos, g.pos, h.pos);
+    let D = quad_area(e.pos, f.pos, h.pos, i.pos);
 
-        if start_index >= vertex_index {
-            break;
-        }
+    var area = D;
 
-        prev_start_index = start_index;
+    let cell_pos = vec2u(vertex_index % GRID_SIZE, vertex_index / GRID_SIZE);
+
+    if cell_pos.x > 0 && cell_pos.x < GRID_SIZE - 1 {
+        base_cell_width *= 2;
+
+        area += C;
+    }
+    if cell_pos.y > 0 && cell_pos.y < GRID_SIZE - 1 {
+        base_cell_height *= 2;
+
+        area += B;
     }
 
-    return prev_start_index;
+    if all(cell_pos > vec2u()) && all(cell_pos < vec2u(GRID_SIZE - 1)) {
+        area += A;
+    }
+
+    let base_cell_area = base_cell_width * base_cell_height;
+
+    let energy = 4.0;
+    return max(0, (base_cell_area / (area + 0.00001)) * energy);
 }
 
-fn calculate_grid_scale(vertex_index: u32) -> f32 {
-    let grid_start_index = calculate_grid_start_index(vertex_index);
-    let grid_size = sqrt(grid_start_index);
+// TODO: Check lens system setup compared to other implementation
 
-    let base_cell_width = 2 / f32(grid_size);
-    let base_cell_area = base_cell_width * base_cell_width;
-
-    // The 9 vertices around and including vertex_index.
-    let a = vertices[vertex_index - grid_size - 1];
-    let b = vertices[vertex_index - grid_size + 0];
-    let c = vertices[vertex_index - grid_size + 1];
-    let d = vertices[vertex_index - 1];
-    let e = vertices[vertex_index + 0];
-    let f = vertices[vertex_index + 1];
-    let g = vertices[vertex_index + grid_size - 1];
-    let h = vertices[vertex_index + grid_size + 0];
-    let i = vertices[vertex_index + grid_size + 1];
-
-}
-
-@vertex
-fn vs_main(
-    in: VertexInput,
-) -> VertexOutput {
-    var out: VertexOutput;
-
-    let lambda = in.instance_index % 3;
-
-    let last_lens = system.interfaces[system.interface_count - 1];
-
-    let ray_dir = normalize(params.ray_dir);
-
+@if (compute)
+@compute
+@workgroup_size(workgroup_size_x, workgroup_size_y, workgroup_size_z)
+fn trace_rays(
+    @builtin(global_invocation_id) gid: vec3u,
+    @builtin(num_workgroups) num_workgroups: vec3u
+) {
     var bid = params.bid;
     if bid < 0 {
-        bid = i32(in.instance_index / 3);
+        bid = i32(gid.z);
     }
 
-    let normalized_pos = in.position.xy * 2 - 1;
-    let sa = last_lens.sa_half;
+//    if u32(bid) >= system.bounce_count {
+//        return;
+//    }
 
-    var in_pos: vec2f;
-    in_pos = normalized_pos;
+    let first_lens = system.interfaces[0];
 
-//    in_pos *= sa;
+    let pos = vec2u(gid.x % GRID_SIZE, gid.x / GRID_SIZE);
+    let uv = vec2f(pos) / vec2f(GRID_SIZE - 1);
+    let normalized_uv = SPREAD * (uv * 2 - 1);
 
-    // Set lens entrance center to the center of the lens with an offset relative to the ray's position and the lens' radius,
-    // i.e., radius * 0.5 away from center of the lens.
-    let ray_pos = system.interfaces[0].center + vec3f(in_pos, 0);
+    let test_ray_pos = vec3f(normalized_uv, 1000);
+    let test_ray = Ray(test_ray_pos, vec3f(0, 0, -1), vec4f(0));
+    let first_lens_intersection = test_sphere(test_ray, first_lens);
 
-//    let light_pos = pos * system.interfaces[0].sa;
-//    let ray_dir = vec3f(0, 0, 1);
+    let ray_pos = first_lens_intersection.pos - params.ray_dir;
+    let ray_dir = normalize(params.ray_dir);
     let ray_tex = vec4f(0, 0, 0, 1);
 
+    let lambda = gid.y % 3;
     let wavelengths = array<f32, 3>(645, 520, 408);
-
     let wavelength = wavelengths[lambda];
 
     let in_ray = Ray(ray_pos, ray_dir, ray_tex);
     let out_ray = trace(bid, in_ray, wavelength);
 
+    let grid_total_count = u32(GRID_SIZE * GRID_SIZE);
+    let index = gid.x + gid.y * grid_total_count + gid.z * grid_total_count * 3;
+
+    rays[index] = out_ray;
+}
+
+@vertex
+fn vs_main(in: VertexInput) -> VertexOutput {
+    var out: VertexOutput;
+
+    let g = u32(GRID_SIZE);
+    let grid_total_count = g * g;
+
+    let vertices = array(
+        0,
+        1,
+        g,
+        1,
+        g + 1,
+        g,
+    );
+
+    let cell_idx = in.vertex_index / 6;
+    let cell_coord = vec2u(cell_idx % (g - 1), cell_idx / (g - 1));
+    let cell_corner_vertex_idx = cell_coord.x + cell_coord.y * g;
+    let vertex_idx = cell_corner_vertex_idx + vertices[in.vertex_index % 6];
+
+    let index = in.instance_index * grid_total_count + vertex_idx;
+
+    let ray = rays[index];
+    let last_lens = system.interfaces[system.interface_count - 1];
+
+    let scale = 1 / last_lens.sa_half;
+
+    var out_pos = ray.pos;
+
+    let vertex_coords = vec2u(vertex_idx % g, vertex_idx / g);
+    out.tex_coords = vec2f(vertex_coords) / f32(g - 1);
+
+
+    out.clip_position = camera.view_proj * vec4f(out_pos.xy * scale, out_pos.z, 1);
+    out.position = out_pos;
+
+    out.tex = ray.tex;
+
+    let lambda = in.instance_index % 3;
+    let wavelengths = array<f32, 3>(650, 510, 475);
+    let wavelength = wavelengths[lambda];
+
     var col = wavelength_to_rgb(wavelength);
-
-    out.position = in.position;
-    out.tex = out_ray.tex;
-
-    var out_pos = out_ray.pos;
-    if out_pos.z == 1 {
-        out_pos.z = last_lens.center.z;
-    }
-
-    var pos = mix(in_ray.pos, out_pos, params.debug_interpolate);
-
-    out.clip_position = camera.view_proj * vec4f(pos.xyz, 1);
-//    out.clip_position = camera.view_proj * vec4f(pos, 1.0);
-
-//    col = vec3f(in.position.xy, 0);
-//    if out.tex.z > 1 {
-//        col = vec3f();
-//    }
-
     out.color = col;
 
-//    out.scale = calculate_grid_scale(in.vertex_index);
+    let barycentric_coords = array(
+        vec3f(1, 0, 0),
+        vec3f(0, 1, 0),
+        vec3f(0, 0, 1),
+    );
 
-//    if out_pos.x < -1 || out_pos.x > 1 || out_pos.y < -1 || out_pos.y > 1 {
-//        out.tex.a = 0;
-//    }
+    out.barycentric_coord = barycentric_coords[in.vertex_index % 3];
 
-//    out.color = vec4f(f32(bounces_and_lengths[params.bid].x) / 11.0, f32(bounces_and_lengths[params.bid].y) / 11.0, 0.0, 1.0);
-//    out.color = vec4f(hsv2rgb(vec3f(f32(bid) / 38.0, 0.5, 0.5)), 0.1);
-
-//    out.color = vec4f(hsv2rgb(vec3f(out_ray.tex.a / 6, 1, 1)), 0.1);
-
-//    out.color = vec4f(hsv2rgb(vec3f(out_ray.tex.a, 1, 1)), 0.1);
-
-//    out.color = vec3f(1.0);
+    out.area_ratio = calculate_grid_cell_area_ratio(index);
 
     return out;
 }
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4f {
-    if in.tex.z > 1 || in.tex.a == 0 {
-        discard;
-    }
+//    if in.tex.z > 1 {
+//        discard;
+//    }
 
-    let focus = 25.0;
-    let aperture_diameter = 14.0;
-    let f = aperture_diameter / focus;
+//    let focus = 25.0;
+//    let aperture_diameter = 14.0;
+//    let f = aperture_diameter / focus;
+//
+//    let f_stop = f / pow(sqrt(2.0), 5);
 
-    let f_stop = f / pow(sqrt(2), 5);
-
-    let normalized_pos = in.position.xy * 2 - 1;
-
+    let cutoff = f32(in.tex.z < 1.0);
     let alpha = in.tex.a;
 
-    let uv = (in.tex.xy / f_stop + 0.5);
-    let tex = textureSample(ghost_texture, ghost_sampler, uv);
+    let tex = textureSample(ghost_texture, ghost_sampler, in.tex_coords);
+    var tex_intensity = saturate(length(in.tex_coords - 0.5) * 0.5);
+	tex_intensity = smoothstep(0., 1., tex_intensity);
+	tex_intensity = mix(0.5, 1., tex_intensity);
 
-    let vignette = smoothstep(0.1, 0.5, 1 - length(in.position.xy * 2 - 1));
+    let vignette = smoothstep(1.0, 0.9, length(in.tex.xy));
+
+
+    let area_ratio = in.area_ratio;
+
+
+//    let intensity = tex * tex_intensity * alpha * vignette * area_ratio * params.intensity * cutoff;
+    let intensity = tex * tex_intensity * alpha * vignette * area_ratio * params.intensity * cutoff;
+
+//    if all(intensity == vec4f(0)) {
+//        discard;
+//    }
 
     let color = vec4f(in.color.xyz, 1);
 
-    return color * tex * vignette * alpha * params.intensity;
+    let final_color = intensity * color;
+
+    return final_color;
+
+    let edge = edge_factor(in.barycentric_coord);
+
+//    let edge_color = vec4f(in.tex_coords, 0, 1) * 0.0001;
+    let edge_color = vec4f(1) * 0.001;
+
+    return mix(final_color, edge_color, 1-edge);
 }

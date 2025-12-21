@@ -1,5 +1,4 @@
 const NUM_INTERFACES: u32 = 32;
-const NUM_BOUNCES: u32 = NUM_INTERFACES * (NUM_INTERFACES - 1) / 2;
 
 struct Lens
 {

@@ -61,7 +61,9 @@ enum PipelineId {
     Fullscreen,
 }
 
-const MIN_GRID_LOG2_SIZE: usize = 4;
+const GRID_LOG2_SIZE: usize = 4;
+const GRID_SIZE: usize = 1 << GRID_LOG2_SIZE;
+const GRID_VERT_COUNT: usize = GRID_SIZE + 1;
 
 pub struct State {
     surface: Surface<'static>,
@@ -98,10 +100,15 @@ pub struct State {
     camera_uniform: Uniform<CameraUniform>,
     lenses_uniform: Uniform<LensSystemUniform>,
     bounces_and_lengths_uniform: Uniform<BouncesAndLengthsUniform>,
-    grid_limits_uniform: Uniform<GridLimitsUniform>,
     params_uniform: Uniform<ParamsUniform>,
 
     texture_bind_group_layout_id: Id<BindGroupLayout>,
+
+    rays_compute_buffer: Buffer,
+    rays_compute_buffer_writeable_bind_group_layout_id: Id<BindGroupLayout>,
+    rays_compute_buffer_writeable_bind_group_id: Id<BindGroup>,
+    rays_compute_buffer_readonly_bind_group_layout_id: Id<BindGroupLayout>,
+    rays_compute_buffer_readonly_bind_group_id: Id<BindGroup>,
 
     starburst_texture_bind_group_id: Id<BindGroup>,
     ghost_texture_bind_group_id: Id<BindGroup>,
@@ -110,11 +117,6 @@ pub struct State {
     pub(crate) light_pos: Vec4,
 
     wavelengths_nm: Vec<f32>,
-
-    grids: Grids,
-    bounces_grid_log2_sizes: Vec<u32>,
-    grids_vertex_buffer: Buffer,
-    grids_index_buffer: Buffer,
 
     aperture_texture: Texture,
     dust_texture: Texture,
@@ -256,20 +258,79 @@ impl State {
             )?,
         });
 
-        // Generate grids for the following 2^N range of sizes.
-        let grids = Grids::new(MIN_GRID_LOG2_SIZE..10);
+        // One grid per RGB channel for each bounce
+        let grid_count = lenses_uniform.bounce_count * 3;
+        let grid_vertex_count = GRID_VERT_COUNT * GRID_VERT_COUNT;
 
-        let grids_vertex_buffer = device.create_buffer_init(&BufferInitDescriptor {
-            label: Some("Grids Vertex Buffer"),
-            contents: bytemuck::cast_slice(grids.vertices()),
-            usage: BufferUsages::VERTEX | BufferUsages::STORAGE,
+        let rays_compute_buffer_size =
+            grid_count as usize * grid_vertex_count * (3 + 3 + 4) * size_of::<f32>();
+
+        let rays_compute_buffer = device.create_buffer(&BufferDescriptor {
+            label: Some("Rays Compute Buffer"),
+            usage: BufferUsages::STORAGE,
+            size: rays_compute_buffer_size as BufferAddress,
+            mapped_at_creation: false,
         });
 
-        let grids_index_buffer = device.create_buffer_init(&BufferInitDescriptor {
-            label: Some("Grids Index Buffer"),
-            contents: bytemuck::cast_slice(grids.indices()),
-            usage: BufferUsages::INDEX | BufferUsages::STORAGE,
-        });
+        let rays_compute_buffer_writable_bind_group_layout =
+            device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+                label: Some("Rays Compute Buffer Writeable Bind Layout"),
+                entries: &[BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                }],
+            });
+
+        let rays_compute_buffer_writable_bind_group =
+            device.create_bind_group(&BindGroupDescriptor {
+                label: Some("Rays Compute Buffer Bind Group"),
+                layout: &rays_compute_buffer_writable_bind_group_layout,
+                entries: &[BindGroupEntry {
+                    binding: 0,
+                    resource: rays_compute_buffer.as_entire_binding(),
+                }],
+            });
+
+        let rays_compute_buffer_readonly_bind_group_layout =
+            device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+                label: Some("Rays Compute Buffer Read-only Bind Layout"),
+                entries: &[BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: ShaderStages::VERTEX,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                }],
+            });
+
+        let rays_compute_buffer_readonly_bind_group =
+            device.create_bind_group(&BindGroupDescriptor {
+                label: Some("Rays Compute Buffer Bind Group"),
+                layout: &rays_compute_buffer_readonly_bind_group_layout,
+                entries: &[BindGroupEntry {
+                    binding: 0,
+                    resource: rays_compute_buffer.as_entire_binding(),
+                }],
+            });
+
+        let rays_compute_buffer_writeable_bind_group_layout_id =
+            bind_group_layouts.add(rays_compute_buffer_writable_bind_group_layout);
+        let rays_compute_buffer_readonly_bind_group_layout_id =
+            bind_group_layouts.add(rays_compute_buffer_readonly_bind_group_layout);
+
+        let rays_compute_buffer_writeable_bind_group_id =
+            bind_groups.add(rays_compute_buffer_writable_bind_group);
+        let rays_compute_buffer_readonly_bind_group_id =
+            bind_groups.add(rays_compute_buffer_readonly_bind_group);
 
         let ray_dir = -Vec3::Z;
 
@@ -314,8 +375,6 @@ impl State {
             &lenses_uniform_buffer,
             &lens_system_uniform_buffer,
             &bounces_and_lengths_buffer,
-            &grids_vertex_buffer,
-            &grids_index_buffer,
         ]
         .iter()
         .enumerate()
@@ -347,43 +406,6 @@ impl State {
             lenses_bind_group_layout_id.clone(),
             lenses_bind_group_id.clone(),
         );
-
-        let grid_limits_uniform =
-            GridLimitsUniform::new(&lenses_uniform.data, &bounces_and_lengths_uniform.data);
-
-        let grid_variances = calculate_grid_triangle_area_variance(
-            &lenses_uniform.data,
-            &bounces_and_lengths_uniform.data,
-            &grids.get_grid(1 << MIN_GRID_LOG2_SIZE).unwrap(),
-        );
-
-        let MinMaxResult::MinMax(var_min, var_max) = grid_variances.iter().copied().minmax() else {
-            panic!("Invalid variance range");
-        };
-
-        let bounces_grid_log2_sizes = {
-            let grid_sizes = grids.get_grid_sizes();
-            let (var_min, var_max) = (var_min.ln(), var_max.ln());
-
-            grid_variances
-                .iter()
-                .map(|variance| {
-                    let t = (variance.ln() - var_min) / (var_max - var_min);
-
-                    let i = t * (grid_sizes.len() - 1) as f32;
-
-                    grid_sizes[i as usize]
-                })
-                .collect_vec()
-        };
-
-        let grid_limits_buffer = device.create_buffer_init(&BufferInitDescriptor {
-            label: Some("Grid Limits Buffer"),
-            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
-            contents: &StorageBuffer::<GridLimitsUniform>::content_of::<_, Vec<u8>>(
-                &grid_limits_uniform,
-            )?,
-        });
 
         let aperture_texture = draw_ghost_sdf(&device, &queue, &mut compiler, 1024, 8, 0.9, 0.0)?;
 
@@ -481,7 +503,7 @@ impl State {
             starburst_scale: 1.0,
             ray_dir,
             bid: -1,
-            intensity: 1.0,
+            intensity: 10.0,
             lambda: 520.0, // 520 nm is some green color.
         };
 
@@ -553,7 +575,7 @@ impl State {
                 label: Some("Params Bind Group Layout"),
                 entries: &[BindGroupLayoutEntry {
                     binding: 0,
-                    visibility: ShaderStages::VERTEX_FRAGMENT,
+                    visibility: ShaderStages::VERTEX_FRAGMENT | ShaderStages::COMPUTE,
                     ty: BindingType::Buffer {
                         ty: BufferBindingType::Uniform,
                         has_dynamic_offset: false,
@@ -578,13 +600,6 @@ impl State {
         let params_uniform = Uniform::new(
             params,
             buffers.add(params_buffer),
-            params_bind_group_layout_id.clone(),
-            params_bind_group_id.clone(),
-        );
-
-        let grid_limits_uniform = Uniform::new(
-            grid_limits_uniform,
-            buffers.add(grid_limits_buffer),
             params_bind_group_layout_id.clone(),
             params_bind_group_id.clone(),
         );
@@ -726,7 +741,6 @@ impl State {
             lenses_uniform,
             params_uniform,
             bounces_and_lengths_uniform,
-            grid_limits_uniform,
 
             texture_bind_group_layout_id,
 
@@ -737,10 +751,11 @@ impl State {
 
             light_pos: vec4(-0.5, -0.2, 0.0, 0.0),
 
-            grids,
-            bounces_grid_log2_sizes,
-            grids_vertex_buffer,
-            grids_index_buffer,
+            rays_compute_buffer,
+            rays_compute_buffer_writeable_bind_group_layout_id,
+            rays_compute_buffer_readonly_bind_group_layout_id,
+            rays_compute_buffer_writeable_bind_group_id,
+            rays_compute_buffer_readonly_bind_group_id,
 
             aperture_texture,
             dust_texture,
@@ -785,7 +800,7 @@ impl State {
             cgmath::Deg(90.0),            // yaw
             cgmath::Deg(0.0),             // pitch
         );
-        let camera_controller = CameraController::new(1.0, 1.75);
+        let camera_controller = CameraController::new(8.0, 1.75);
 
         let camera_uniform = CameraUniform::from_camera_and_projection(&camera, projection);
 
@@ -1098,58 +1113,153 @@ impl State {
             if let Some(name) = shader.path.file_prefix().unwrap().to_str() {
                 match name {
                     "render_ghosts" => {
-                        let bind_group_layouts = [
-                            &self.camera_uniform.bind_group_layout_id,
-                            &self.lenses_uniform.bind_group_layout_id,
-                            &self.params_uniform.bind_group_layout_id,
-                            &self.texture_bind_group_layout_id,
-                        ]
-                        .iter()
-                        .map(|&id| &self.bind_group_layouts[id])
-                        .collect_vec();
+                        self.compiler.add_constants([
+                            (
+                                "workgroup_size_x",
+                                (GRID_VERT_COUNT * GRID_VERT_COUNT) as f64,
+                            ),
+                            ("workgroup_size_y", 3.0),
+                            ("workgroup_size_z", 1.0),
+                            ("GRID_SIZE", GRID_VERT_COUNT as f64),
+                        ]);
 
-                        match Self::create_default_render_pipeline(
-                            &self.device,
-                            Some("Ghost"),
-                            TextureFormat::Rgba16Float,
-                            &shader_module,
-                            &bind_group_layouts,
-                            None,
-                        ) {
-                            Ok(pipeline) => {
-                                shader.shader_last_error = None;
+                        // Compute shader
+                        {
+                            self.compiler.set_feature("compute", Feature::Enable);
 
-                                self.render_pipelines.insert(PipelineId::Ghosts, pipeline);
-                            }
-                            Err(err) => {
-                                shader.shader_last_error = Some(err.to_string());
-                            }
-                        };
+                            let shader_module = match create_shader(
+                                &self.device,
+                                &mut self.compiler,
+                                Some(&format!("Shader {}", shader.path.display())),
+                                &format!("package::{name}"),
+                            ) {
+                                Ok(shader) => shader,
+                                Err(err) => {
+                                    shader.shader_last_error = Some(err.to_string());
 
-                        match Self::create_default_render_pipeline(
-                            &self.device,
-                            Some("Render Wireframe Pipeline"),
-                            TextureFormat::Rgba16Float,
-                            &shader_module,
-                            &bind_group_layouts,
-                            Some(PrimitiveState {
-                                topology: PrimitiveTopology::LineList,
-                                front_face: FrontFace::Cw,
-                                cull_mode: None,
-                                polygon_mode: PolygonMode::Line,
-                                ..Default::default()
-                            }),
-                        ) {
-                            Ok(pipeline) => {
-                                shader.shader_last_error = None;
+                                    return;
+                                }
+                            };
 
-                                self.render_pipelines
-                                    .insert(PipelineId::Wireframe, pipeline);
-                            }
-                            Err(err) => {
-                                shader.shader_last_error = Some(err.to_string());
-                            }
-                        };
+                            let bind_group_layouts = [
+                                &self.camera_uniform.bind_group_layout_id,
+                                &self.lenses_uniform.bind_group_layout_id,
+                                &self.params_uniform.bind_group_layout_id,
+                                &self.texture_bind_group_layout_id,
+                                &self.rays_compute_buffer_writeable_bind_group_layout_id,
+                            ]
+                            .iter()
+                            .map(|&id| &self.bind_group_layouts[id])
+                            .collect_vec();
+
+                            let pipeline_layout =
+                                self.device
+                                    .create_pipeline_layout(&PipelineLayoutDescriptor {
+                                        label: Some("Ghost Compute Pipeline Layout"),
+                                        bind_group_layouts: &bind_group_layouts,
+                                        push_constant_ranges: &[],
+                                    });
+
+                            let pipeline =
+                                self.device
+                                    .create_compute_pipeline(&ComputePipelineDescriptor {
+                                        label: Some("Ghost Compute Pipeline"),
+                                        layout: Some(&pipeline_layout),
+                                        module: &shader_module,
+                                        entry_point: Some("trace_rays"),
+                                        cache: None,
+                                        compilation_options: PipelineCompilationOptions::default(),
+                                    });
+
+                            self.compute_pipelines.insert(PipelineId::Ghosts, pipeline);
+                        }
+
+                        // Render shader
+                        {
+                            self.compiler.set_feature("compute", Feature::Disable);
+
+                            let shader_module = match create_shader(
+                                &self.device,
+                                &mut self.compiler,
+                                Some(&format!("Shader {}", shader.path.display())),
+                                &format!("package::{name}"),
+                            ) {
+                                Ok(shader) => shader,
+                                Err(err) => {
+                                    shader.shader_last_error = Some(err.to_string());
+
+                                    return;
+                                }
+                            };
+
+                            let bind_group_layouts = [
+                                &self.camera_uniform.bind_group_layout_id,
+                                &self.lenses_uniform.bind_group_layout_id,
+                                &self.params_uniform.bind_group_layout_id,
+                                &self.texture_bind_group_layout_id,
+                                &self.rays_compute_buffer_readonly_bind_group_layout_id,
+                            ]
+                            .iter()
+                            .map(|&id| &self.bind_group_layouts[id])
+                            .collect_vec();
+
+                            let pipeline_layout =
+                                self.device
+                                    .create_pipeline_layout(&PipelineLayoutDescriptor {
+                                        label: Some("Ghost Render Pipeline Layout"),
+                                        bind_group_layouts: &bind_group_layouts,
+                                        push_constant_ranges: &[],
+                                    });
+
+                            let pipeline =
+                                self.device
+                                    .create_render_pipeline(&RenderPipelineDescriptor {
+                                        label: Some("Ghost Render Pipeline"),
+                                        layout: Some(&pipeline_layout),
+                                        vertex: VertexState {
+                                            module: &shader_module,
+                                            entry_point: Some("vs_main"),
+                                            buffers: &[],
+                                            compilation_options:
+                                                PipelineCompilationOptions::default(),
+                                        },
+                                        fragment: Some(FragmentState {
+                                            module: &shader_module,
+                                            entry_point: Some("fs_main"),
+                                            targets: &[Some(ColorTargetState {
+                                                format: TextureFormat::Rgba16Float,
+                                                blend: Some(ADDITIVE_BLEND),
+                                                write_mask: ColorWrites::ALL,
+                                            })],
+                                            compilation_options:
+                                                PipelineCompilationOptions::default(),
+                                        }),
+                                        primitive: PrimitiveState {
+                                            topology: PrimitiveTopology::TriangleList,
+                                            strip_index_format: None,
+                                            front_face: FrontFace::Cw,
+                                            cull_mode: None, // Some(Face::Back),
+                                            // Setting this to anything other than Fill requires Features::NON_FILL_POLYGON_MODE
+                                            polygon_mode: PolygonMode::Fill,
+                                            // Requires Features::DEPTH_CLIP_CONTROL
+                                            unclipped_depth: false,
+                                            // Requires Features::CONSERVATIVE_RASTERIZATION
+                                            conservative: false,
+                                        },
+                                        depth_stencil: None,
+                                        multisample: MultisampleState {
+                                            count: 1,
+                                            mask: !0,
+                                            alpha_to_coverage_enabled: false,
+                                        },
+                                        multiview: None,
+                                        cache: None,
+                                    });
+
+                            self.render_pipelines.insert(PipelineId::Ghosts, pipeline);
+                        }
+
+                        shader.shader_last_error = None;
                     }
                     "render_starburst" => {
                         let shader_module = match create_shader(
@@ -1559,6 +1669,35 @@ impl State {
 
         // Render flare
         if !self.debug_mode {
+            {
+                if let Some(pipeline) = self.compute_pipelines.get(&PipelineId::Ghosts) {
+                    let mut compute_pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+                        label: Some("Ghost Compute Pass"),
+                        timestamp_writes: None,
+                    });
+
+                    let binds = [
+                        &self.camera_uniform.bind_group_id,
+                        &self.lenses_uniform.bind_group_id,
+                        &self.params_uniform.bind_group_id,
+                        &self.ghost_texture_bind_group_id,
+                        &self.rays_compute_buffer_writeable_bind_group_id,
+                    ];
+
+                    for (i, &bind_group_id) in binds.iter().enumerate() {
+                        compute_pass.set_bind_group(
+                            i as u32,
+                            &self.bind_groups[bind_group_id],
+                            &[],
+                        );
+                    }
+
+                    compute_pass.set_pipeline(pipeline);
+
+                    compute_pass.dispatch_workgroups(1, 1, self.lenses_uniform.data.bounce_count)
+                }
+            }
+
             let mut render_pass = encoder.begin_render_pass(&RenderPassDescriptor {
                 label: Some("Lens Flare Pass"),
                 color_attachments: &[Some(RenderPassColorAttachment {
@@ -1582,15 +1721,12 @@ impl State {
                     &self.lenses_uniform.bind_group_id,
                     &self.params_uniform.bind_group_id,
                     &self.ghost_texture_bind_group_id,
+                    &self.rays_compute_buffer_readonly_bind_group_id,
                 ];
 
                 for (i, &bind_group_id) in binds.iter().enumerate() {
                     render_pass.set_bind_group(i as u32, &self.bind_groups[bind_group_id], &[]);
                 }
-
-                render_pass.set_vertex_buffer(0, self.grids_vertex_buffer.slice(..));
-                render_pass
-                    .set_index_buffer(self.grids_index_buffer.slice(..), IndexFormat::Uint32);
 
                 let selected_bid = self.params_uniform.data.bid;
                 let bounce_range = if selected_bid < 0 {
@@ -1599,22 +1735,12 @@ impl State {
                     selected_bid as u32..(selected_bid + 1) as u32
                 };
 
-                let bounces_and_grid_sizes: Vec<(u32, usize)> = bounce_range
-                    .map(|bid| {
-                        let grid_size = self.bounces_grid_log2_sizes[bid as usize] as usize;
-                        let grid_size = 32;
-
-                        (bid, grid_size)
-                    })
-                    .collect::<Vec<_>>();
+                let vertex_count = (GRID_SIZE * GRID_SIZE * 6) as u32;
 
                 if let Some(render_pipeline) = self.render_pipelines.get(&PipelineId::Ghosts) {
                     render_pass.set_pipeline(render_pipeline);
 
-                    for &(bid, grid_size) in &bounces_and_grid_sizes {
-                        let (vertex_range, index_range) =
-                            self.grids.get_grid_size_index_ranges(grid_size).unwrap();
-                    }
+                    render_pass.draw(0..vertex_count, bounce_range);
                 }
             }
 
@@ -1915,7 +2041,7 @@ impl State {
                     ui.slider(
                         "Light Intensity",
                         0.0,
-                        5.0,
+                        100.0,
                         &mut self.params_uniform.data.intensity,
                     );
 

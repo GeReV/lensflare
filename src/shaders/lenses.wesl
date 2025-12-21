@@ -1,5 +1,5 @@
 import package::utils::PI;
-import package::lenses_types::{Lens, LensInterface, Ray, Intersection, LensSystem, NUM_BOUNCES};
+import package::lenses_types::{Lens, LensInterface, Ray, Intersection, LensSystem};
 
 @group(1) @binding(0)
 var<storage, read> lenses: array<Lens>;
@@ -10,13 +10,7 @@ var<uniform> system: LensSystem;
 // First two elements are the bounces, element 3 is length.
 // Merged to handle 16-byte memory alignment.
 @group(1) @binding(2)
-var<storage, read> bounces_and_lengths: array<vec3u, NUM_BOUNCES>;
-
-@group(1) @binding(3)
-var<storage, read> vertices: array<vec3f>;
-
-@group(1) @binding(4)
-var<storage, read> indices: array<u32>;
+var<storage, read> bounces_and_lengths: array<vec3u>;
 
 fn compute_ref_index(lambda_in_micrometer: f32, lens: Lens) -> f32 {
         let lambda_pow2 = lambda_in_micrometer * lambda_in_micrometer;
@@ -254,7 +248,7 @@ fn trace(
 
        if !bReflect // refraction
        {
-           const EPSILON = 0.0001;
+           const EPSILON = 0.00001;
 
            r.dir = refract ( r.dir , i.norm , n0 / n2 ) ;
 
@@ -269,10 +263,10 @@ fn trace(
        {
            // reflection with anti-reflection coating
            r.dir = reflect ( r.dir , i.norm ) ;
-           var R = fresnel_anti_reflect(i.theta, lambda, f.d0, n0, n1, n2);
+           var R = fresnel_anti_reflect(i.theta + 0.0001, lambda, f.d0, n0, n1, n2);
 
             // TODO: Not sure why NaNs occur here.
-           R = max(0, R);
+           R = max(0.0, R);
 
            r.tex.a *= R; // update ray intensity
        }
@@ -283,8 +277,6 @@ fn trace(
    if k<length {
     // early-exit rays = invalid
     cull_ray(&r);
-   } else {
-        r.pos.z = 1;
    }
 
    return r;
