@@ -4,10 +4,7 @@ import constants::{base_size, min_size};
 @group(0) @binding(0) var tex_sampler : sampler;
 @group(0) @binding(1) var texture : texture_2d<f32>;
 
-@group(1) @binding(0) var dust_tex_sampler : sampler;
-@group(1) @binding(1) var dust_texture : texture_2d<f32>;
-
-@group(2) @binding(0)
+@group(1) @binding(0)
 var<storage, read> colors: array<vec4f>;
 
 struct VertexOutput {
@@ -41,43 +38,34 @@ fn vs_main(@builtin(vertex_index) vertex_index : u32, @builtin(instance_index) i
 
 @fragment
 fn fs_main(input: VertexOutput) -> @location(0) vec4f {
+  // Spiral filter as used by https://www.jpgrenier.org/lensflare.html
+  // This basically just copies the texture multiple times in a small outwards spiral,
+  // creating a blur effect.
   var out = vec4f();
 
   let d = length(input.uv * 2 - 1);
 
   let uv = input.uv - 0.5;
 
-  let clamped = f32(d < 1);
+  const rotation = 0.03 * PI;
 
   let count = arrayLength(&colors);
   for(var i: u32 = 0; i < count; i++) {
     let t = f32(i) / f32(count - 1);
-    let scale1 = mix(0.8, 1, t);
-    let scale2 = mix(1.0, 1.5, t);
+    let a = 2 * PI * t * 2;
 
-    let scaled_uv1 = (uv / scale1) + 0.5;
-    let scaled_uv2 = (uv / scale2) + 0.5;
-//    let uv = input.uv;
+    let spiral = vec2f(cos(a), sin(a)) * 0.002 * t;
+    let rot = rotation_mat2(t * 0.05 + rotation);
+    let rotated_uv = rot * (uv + spiral);
 
-    var p = textureSample(texture, tex_sampler, scaled_uv1);
-    var l = length(p.xy);
-    let starburst_val = l * l;
+    let starburst = textureSample(texture, tex_sampler, rotated_uv + 0.5);
 
-    p = textureSample(dust_texture, dust_tex_sampler, scaled_uv2);
-    l = length(p.xy);
-    let dust_val = l * l;
-
-    let fade = mix(1.0, 0, d) * clamped;
-
-    let color_mix = mix(vec4f(1), colors[i], 0.8);
-
-    let starburst = (starburst_val * mix(0.8, 1, d) * (1 - t) * color_mix) * 0.0001;
-    let dust = pow(dust_val * smoothstep(0, 1, 0.5 - d) * colors[i], vec4f(1.1)) * 0.0002;
-
-    out += (starburst + dust) * fade;
+    out += starburst;
   }
 
   out /= f32(count);
+
+//  return textureSample(texture, tex_sampler, input.uv);
 
   return out;
 }

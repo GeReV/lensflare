@@ -16,6 +16,7 @@ mod fft;
 mod colors;
 mod texture;
 mod starburst;
+mod starburst_pipeline;
 
 use anyhow::*;
 use winit::event_loop::EventLoop;

@@ -8,12 +8,10 @@ struct Parameters {
     wavelength_meters: f32,
 }
 
-@group(0)
-@binding(0)
+@group(0) @binding(0)
 var dst: texture_storage_2d<rg32float, write>;
 
-@group(0)
-@binding(1)
+@group(0) @binding(1)
 var<storage, read> params: Parameters;
 
 @compute

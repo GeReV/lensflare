@@ -1,33 +1,44 @@
 use crate::arc::Arc;
 use crate::camera::{Camera, CameraController, Projection};
 use crate::ghost::{draw_ghost_sdf, fft_ghost_gpu};
-use crate::grids::Grids;
 use crate::hot_reload::{HotReloadResult, HotReloadShader};
 use crate::lenses::{Lens, LensInterface};
 use crate::registry::{Id, Registry};
 use crate::shaders::create_shader;
-use crate::software::calculate_grid_triangle_area_variance;
 use crate::starburst::create_starburst_gpu;
 use crate::texture::TextureExt;
 use crate::uniforms::{
-    BouncesAndLengthsUniform, CameraUniform, GridLimitsUniform, LensSystemUniform, ParamsUniform,
-    Uniform,
+    BouncesAndLengthsUniform, CameraUniform, LensSystemUniform, ParamsUniform, Uniform,
 };
 use crate::utils::ADDITIVE_BLEND;
-use crate::vertex::{ColoredVertex, Vertex};
+use crate::vertex::ColoredVertex;
 use encase::{StorageBuffer, UniformBuffer};
 use glam::{vec3, vec4, Vec3, Vec3Swizzles, Vec4};
+use image::{EncodableLayout, ImageReader};
 use imgui::{Condition, FontSource, MouseCursor};
 use imgui_wgpu::{Renderer, RendererConfig};
 use imgui_winit_support::WinitPlatform;
-use itertools::{Itertools, MinMaxResult};
+use itertools::Itertools;
 use std::collections::HashMap;
 use std::f32::consts::PI;
 use std::time::{Duration, Instant};
-use wesl::{StandardResolver, Wesl};
-use wgpu::util::{BufferInitDescriptor, DeviceExt};
+use wesl::{Feature, StandardResolver, Wesl};
+use wgpu::util::{BufferInitDescriptor, DeviceExt, TextureDataOrder};
 use wgpu::wgt::{SamplerDescriptor, TextureDescriptor};
-use wgpu::{AddressMode, Backends, BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayout, BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingResource, BindingType, BlendState, Buffer, BufferAddress, BufferBindingType, BufferDescriptor, BufferUsages, Color, ColorTargetState, ColorWrites, CommandEncoderDescriptor, Device, DeviceDescriptor, Extent3d, Face, Features, FilterMode, FragmentState, FrontFace, IndexFormat, Instance, InstanceDescriptor, Label, LoadOp, MultisampleState, Operations, PipelineCompilationOptions, PipelineLayoutDescriptor, PolygonMode, PowerPreference, PresentMode, PrimitiveState, PrimitiveTopology, Queue, RenderPass, RenderPassColorAttachment, RenderPassDescriptor, RenderPipeline, RenderPipelineDescriptor, RequestAdapterOptions, Sampler, SamplerBindingType, ShaderModule, ShaderStages, StoreOp, Surface, SurfaceConfiguration, Texture, TextureDimension, TextureFormat, TextureSampleType, TextureUsages, TextureViewDimension, Trace, VertexState};
+use wgpu::{
+    AddressMode, Backends, BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayout,
+    BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingResource, BindingType, BlendState,
+    Buffer, BufferAddress, BufferBindingType, BufferDescriptor, BufferUsages, Color,
+    ColorTargetState, ColorWrites, CommandEncoderDescriptor, ComputePassDescriptor,
+    ComputePipeline, ComputePipelineDescriptor, Device, DeviceDescriptor, Extent3d, Face, Features,
+    FilterMode, FragmentState, FrontFace, Instance, InstanceDescriptor, LoadOp, MultisampleState,
+    Operations, PipelineCompilationOptions, PipelineLayoutDescriptor, PolygonMode, PowerPreference,
+    PresentMode, PrimitiveState, PrimitiveTopology, Queue, RenderPass, RenderPassColorAttachment,
+    RenderPassDescriptor, RenderPipeline, RenderPipelineDescriptor, RequestAdapterOptions, Sampler,
+    SamplerBindingType, ShaderStages, StoreOp, Surface, SurfaceConfiguration, Texture,
+    TextureDimension, TextureFormat, TextureSampleType, TextureUsages, TextureViewDimension, Trace,
+    VertexState,
+};
 use winit::event::{MouseButton, MouseScrollDelta};
 use winit::event_loop::ActiveEventLoop;
 use winit::keyboard::KeyCode;
@@ -59,6 +70,7 @@ pub struct State {
     config: SurfaceConfiguration,
     is_surface_configured: bool,
     pub(crate) window: std::sync::Arc<Window>,
+    compute_pipelines: HashMap<PipelineId, ComputePipeline>,
     render_pipelines: HashMap<PipelineId, RenderPipeline>,
 
     render_target: Texture,
@@ -105,6 +117,7 @@ pub struct State {
     grids_index_buffer: Buffer,
 
     aperture_texture: Texture,
+    dust_texture: Texture,
     ghost_texture: Texture,
     starburst_texture: Texture,
 
@@ -266,7 +279,7 @@ impl State {
                 entries: &[
                     BindGroupLayoutEntry {
                         binding: 0,
-                        visibility: ShaderStages::VERTEX_FRAGMENT,
+                        visibility: ShaderStages::VERTEX_FRAGMENT | ShaderStages::COMPUTE,
                         ty: BindingType::Buffer {
                             ty: BufferBindingType::Storage { read_only: true },
                             has_dynamic_offset: false,
@@ -276,7 +289,7 @@ impl State {
                     },
                     BindGroupLayoutEntry {
                         binding: 1,
-                        visibility: ShaderStages::VERTEX_FRAGMENT,
+                        visibility: ShaderStages::VERTEX_FRAGMENT | ShaderStages::COMPUTE,
                         ty: BindingType::Buffer {
                             ty: BufferBindingType::Uniform,
                             has_dynamic_offset: false,
@@ -286,27 +299,7 @@ impl State {
                     },
                     BindGroupLayoutEntry {
                         binding: 2,
-                        visibility: ShaderStages::VERTEX_FRAGMENT,
-                        ty: BindingType::Buffer {
-                            ty: BufferBindingType::Storage { read_only: true },
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
-                    },
-                    BindGroupLayoutEntry {
-                        binding: 3,
-                        visibility: ShaderStages::VERTEX_FRAGMENT,
-                        ty: BindingType::Buffer {
-                            ty: BufferBindingType::Storage { read_only: true },
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
-                    },
-                    BindGroupLayoutEntry {
-                        binding: 4,
-                        visibility: ShaderStages::VERTEX_FRAGMENT,
+                        visibility: ShaderStages::VERTEX_FRAGMENT | ShaderStages::COMPUTE,
                         ty: BindingType::Buffer {
                             ty: BufferBindingType::Storage { read_only: true },
                             has_dynamic_offset: false,
@@ -440,11 +433,34 @@ impl State {
         });
         let starburst_texture_view = starburst_texture.create_view_default();
 
+        let dust_image = ImageReader::open("dust.png")?.decode()?.to_luma16();
+
+        let dust_texture = device.create_texture_with_data(
+            &queue,
+            &TextureDescriptor {
+                label: Some("Dust Texture"),
+                size: Extent3d {
+                    width: dust_image.width(),
+                    height: dust_image.height(),
+                    depth_or_array_layers: 1,
+                },
+                usage: TextureUsages::TEXTURE_BINDING,
+                dimension: TextureDimension::D2,
+                format: TextureFormat::R8Unorm,
+                sample_count: 1,
+                mip_level_count: 1,
+                view_formats: &[],
+            },
+            TextureDataOrder::LayerMajor,
+            dust_image.as_bytes(),
+        );
+
         create_starburst_gpu(
             &device,
             &queue,
             &mut compiler,
             &aperture_texture,
+            &dust_texture,
             &starburst_texture,
             &wavelengths_nm,
         )?;
@@ -597,6 +613,7 @@ impl State {
         });
 
         let mut render_pipelines = HashMap::new();
+        let mut compute_pipelines = HashMap::new();
 
         Self::create_static_render_pipelines(
             &device,
@@ -616,6 +633,7 @@ impl State {
             HotReloadShader::new("src/shaders/render_ghosts.wesl"),
             HotReloadShader::new("src/shaders/render_starburst.wesl"),
             HotReloadShader::new("src/shaders/starburst.wesl"),
+            HotReloadShader::new("src/shaders/starburst_filter.wesl"),
             HotReloadShader::new("src/shaders/fullscreen.wesl"),
         ];
 
@@ -688,6 +706,7 @@ impl State {
             is_surface_configured: false,
             window,
             render_pipelines,
+            compute_pipelines,
             buffers,
             bind_group_layouts,
             bind_groups,
@@ -724,6 +743,7 @@ impl State {
             grids_index_buffer,
 
             aperture_texture,
+            dust_texture,
             ghost_texture,
             starburst_texture,
 
@@ -1063,14 +1083,17 @@ impl State {
 
     fn update_render_pipelines(&mut self) {
         for shader in self.hot_reload_shaders.iter_mut() {
-            let Ok(shader_result) = shader.try_hot_reload(&self.device, &mut self.compiler) else {
-                continue;
-            };
-
-            let shader_module = match shader_result {
-                HotReloadResult::Updated(shader_module) => shader_module,
-                HotReloadResult::Unchanged => continue,
-            };
+            match shader.try_hot_reload() {
+                Ok(HotReloadResult::Unchanged) => {
+                    continue;
+                }
+                Err(err) => {
+                    shader.shader_last_error = Some(err.to_string());
+                }
+                _ => {
+                    // Fallthrough
+                }
+            }
 
             if let Some(name) = shader.path.file_prefix().unwrap().to_str() {
                 match name {
@@ -1129,6 +1152,20 @@ impl State {
                         };
                     }
                     "render_starburst" => {
+                        let shader_module = match create_shader(
+                            &self.device,
+                            &mut self.compiler,
+                            Some(&format!("Shader {}", shader.path.display())),
+                            &format!("package::{name}"),
+                        ) {
+                            Ok(shader) => shader,
+                            Err(err) => {
+                                shader.shader_last_error = Some(err.to_string());
+
+                                return;
+                            }
+                        };
+
                         let bind_group_layouts = [
                             &self.camera_uniform.bind_group_layout_id,
                             &self.lenses_uniform.bind_group_layout_id,
@@ -1195,12 +1232,13 @@ impl State {
                         self.render_pipelines
                             .insert(PipelineId::Starburst, render_pipeline);
                     }
-                    "starburst" => {
+                    "starburst" | "starburst_filter" => {
                         match create_starburst_gpu(
                             &self.device,
                             &self.queue,
                             &mut self.compiler,
                             &self.aperture_texture,
+                            &self.dust_texture,
                             &self.starburst_texture,
                             &self.wavelengths_nm,
                         ) {
@@ -1213,6 +1251,20 @@ impl State {
                         };
                     }
                     "fullscreen" => {
+                        let shader_module = match create_shader(
+                            &self.device,
+                            &mut self.compiler,
+                            Some(&format!("Shader {}", shader.path.display())),
+                            &format!("package::{name}"),
+                        ) {
+                            Ok(shader) => shader,
+                            Err(err) => {
+                                shader.shader_last_error = Some(err.to_string());
+
+                                return;
+                            }
+                        };
+
                         let fullscreen_bind_group_layout =
                             &self.bind_group_layouts[&self.texture_bind_group_layout_id];
 
@@ -1276,66 +1328,6 @@ impl State {
                 }
             }
         }
-    }
-
-    fn create_default_render_pipeline<'shader>(
-        device: &Device,
-        label: Label<'shader>,
-        texture_format: TextureFormat,
-        shader: &ShaderModule,
-        bind_group_layouts: &[&BindGroupLayout],
-        primitive: Option<PrimitiveState>,
-    ) -> anyhow::Result<RenderPipeline> {
-        let label = label.unwrap_or("Default Render Pipeline");
-
-        let render_pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
-            label: Some(&format!("{label} Layout")),
-            bind_group_layouts: &bind_group_layouts,
-            push_constant_ranges: &[],
-        });
-
-        let render_pipeline_default = RenderPipelineDescriptor {
-            label: Some(label),
-            layout: Some(&render_pipeline_layout),
-            vertex: VertexState {
-                module: shader,
-                entry_point: Some("vs_main"),
-                buffers: &[Vertex::desc()],
-                compilation_options: PipelineCompilationOptions::default(),
-            },
-            fragment: Some(FragmentState {
-                module: shader,
-                entry_point: Some("fs_main"),
-                targets: &[Some(ColorTargetState {
-                    format: texture_format,
-                    blend: Some(ADDITIVE_BLEND),
-                    write_mask: ColorWrites::ALL,
-                })],
-                compilation_options: PipelineCompilationOptions::default(),
-            }),
-            primitive: primitive.unwrap_or(PrimitiveState {
-                topology: PrimitiveTopology::TriangleList,
-                strip_index_format: None,
-                front_face: FrontFace::Cw,
-                cull_mode: None, // Some(Face::Back),
-                // Setting this to anything other than Fill requires Features::NON_FILL_POLYGON_MODE
-                polygon_mode: PolygonMode::Fill,
-                // Requires Features::DEPTH_CLIP_CONTROL
-                unclipped_depth: false,
-                // Requires Features::CONSERVATIVE_RASTERIZATION
-                conservative: false,
-            }),
-            depth_stencil: None,
-            multisample: MultisampleState {
-                count: 1,
-                mask: !0,
-                alpha_to_coverage_enabled: false,
-            },
-            multiview: None,
-            cache: None,
-        };
-
-        anyhow::Ok(device.create_render_pipeline(&render_pipeline_default))
     }
 
     fn setup_imgui(
@@ -1583,26 +1575,6 @@ impl State {
                 occlusion_query_set: None,
             });
 
-            // Starburst
-            {
-                let binds = [
-                    &self.camera_uniform.bind_group_id,
-                    &self.lenses_uniform.bind_group_id,
-                    &self.params_uniform.bind_group_id,
-                    &self.starburst_texture_bind_group_id,
-                ];
-
-                for (i, &bind_group_id) in binds.iter().enumerate() {
-                    render_pass.set_bind_group(i as u32, &self.bind_groups[bind_group_id], &[]);
-                }
-
-                if let Some(render_pipeline) = self.render_pipelines.get(&PipelineId::Starburst) {
-                    render_pass.set_pipeline(render_pipeline);
-
-                    render_pass.draw(0..6, 0..1);
-                }
-            }
-
             // Ghosts
             {
                 let binds = [
@@ -1642,29 +1614,30 @@ impl State {
                     for &(bid, grid_size) in &bounces_and_grid_sizes {
                         let (vertex_range, index_range) =
                             self.grids.get_grid_size_index_ranges(grid_size).unwrap();
-
-                        render_pass.draw_indexed(
-                            index_range,
-                            vertex_range.start as i32,
-                            (bid * 3)..(bid + 1) * 3,
-                        );
                     }
                 }
+            }
 
-                // if let Some(render_pipeline) = self.render_pipelines.get(&PipelineId::Wireframe) {
-                //     render_pass.set_pipeline(render_pipeline);
-                //
-                //     for &(bid, grid_size) in &bounces_and_grid_sizes {
-                //         let (vertex_range, index_range) =
-                //             self.grids.get_grid_size_index_ranges(grid_size).unwrap();
-                //
-                //         render_pass.draw_indexed(
-                //             index_range,
-                //             vertex_range.start as i32,
-                //             (bid * 3)..(bid + 1) * 3,
-                //         );
-                //     }
-                // }
+            // Starburst
+            // NOTE: The starburst should be rendered before the ghosts, but since everything is
+            //  composed additively, this doesn't matter.
+            {
+                let binds = [
+                    &self.camera_uniform.bind_group_id,
+                    &self.lenses_uniform.bind_group_id,
+                    &self.params_uniform.bind_group_id,
+                    &self.starburst_texture_bind_group_id,
+                ];
+
+                for (i, &bind_group_id) in binds.iter().enumerate() {
+                    render_pass.set_bind_group(i as u32, &self.bind_groups[bind_group_id], &[]);
+                }
+
+                if let Some(render_pipeline) = self.render_pipelines.get(&PipelineId::Starburst) {
+                    render_pass.set_pipeline(render_pipeline);
+
+                    render_pass.draw(0..6, 0..1);
+                }
             }
         }
 
@@ -1733,25 +1706,31 @@ impl State {
         let output_view = output.texture.create_view_default();
 
         {
-            let mut render_pass = encoder.begin_render_pass(&RenderPassDescriptor {
-                label: Some("Fullscreen Pass"),
-                color_attachments: &[Some(RenderPassColorAttachment {
-                    view: &output_view,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: Operations {
-                        load: LoadOp::Clear(Color::BLACK),
-                        store: StoreOp::Store,
-                    },
-                })],
-                ..Default::default()
-            });
+            if let Some(pipeline) = self.render_pipelines.get(&PipelineId::Fullscreen) {
+                let mut render_pass = encoder.begin_render_pass(&RenderPassDescriptor {
+                    label: Some("Fullscreen Pass"),
+                    color_attachments: &[Some(RenderPassColorAttachment {
+                        view: &output_view,
+                        depth_slice: None,
+                        resolve_target: None,
+                        ops: Operations {
+                            load: LoadOp::Clear(Color::BLACK),
+                            store: StoreOp::Store,
+                        },
+                    })],
+                    ..Default::default()
+                });
 
-            render_pass.set_bind_group(0, &self.bind_groups[&self.fullscreen_bind_group_id], &[]);
+                render_pass.set_bind_group(
+                    0,
+                    &self.bind_groups[&self.fullscreen_bind_group_id],
+                    &[],
+                );
 
-            render_pass.set_pipeline(&self.render_pipelines[&PipelineId::Fullscreen]);
+                render_pass.set_pipeline(pipeline);
 
-            render_pass.draw(0..3, 0..1);
+                render_pass.draw(0..3, 0..1);
+            }
         }
 
         // Render UI
@@ -1805,6 +1784,7 @@ impl State {
                 &self.queue,
                 &mut self.compiler,
                 &self.aperture_texture,
+                &self.dust_texture,
                 &self.starburst_texture,
                 &wavelengths_nm,
             )?;
