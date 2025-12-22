@@ -211,14 +211,13 @@ fn trace(
        var n0_idx: u32;
        var n2_idx: u32;
 
-       let n1 = f.n.y;
 
         if r.dir.z < 0 {
-            n0_idx = u32(f.n.x);
-            n2_idx = u32(f.n.z);
+            n0_idx = f.n.x;
+            n2_idx = f.n.y;
         } else {
-            n0_idx = u32(f.n.z);
-            n2_idx = u32(f.n.x);
+            n0_idx = f.n.y;
+            n2_idx = f.n.x;
         }
 
         var n0: f32;
@@ -236,15 +235,7 @@ fn trace(
             n2 = 1;
         }
 
-//        let lambda_offset = (1 - ((lambda - 380) / (800 - 380))) * 0.005;
-//
-//        n1 += lambda_offset;
-//
-//        if n0 > 1 {
-//            n0 += lambda_offset;
-//        } else {
-//            n2 += lambda_offset;
-//        }
+       let n1 = max(sqrt(n0 * n2), 1.38);
 
        if !bReflect // refraction
        {
@@ -263,7 +254,7 @@ fn trace(
        {
            // reflection with anti-reflection coating
            r.dir = reflect ( r.dir , i.norm ) ;
-           var R = fresnel_anti_reflect(i.theta + 0.0001, lambda, f.d0, n0, n1, n2);
+           var R = fresnel_anti_reflect(i.theta + 0.0001, lambda, f.d1, n0, n1, n2);
 
             // TODO: Not sure why NaNs occur here.
            R = max(0.0, R);

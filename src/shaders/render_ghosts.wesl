@@ -31,7 +31,9 @@ struct VertexOutput {
     @location(5) area_ratio: f32,
 }
 
-const SPREAD: f32 = 1.0;
+const SPREAD: f32 = 0.75;
+
+const WAVELENGTHS: array<f32, 3> = array(645, 520, 408);
 
 fn edge_factor(x: vec3f) -> f32 {
   let d = fwidth(x);
@@ -129,9 +131,7 @@ fn trace_rays(
     let ray_dir = normalize(params.ray_dir);
     let ray_tex = vec4f(0, 0, 0, 1);
 
-    let lambda = gid.y % 3;
-    let wavelengths = array<f32, 3>(645, 520, 408);
-    let wavelength = wavelengths[lambda];
+    let wavelength = WAVELENGTHS[gid.y % 3];
 
     let in_ray = Ray(ray_pos, ray_dir, ray_tex);
     let out_ray = trace(bid, in_ray, wavelength);
@@ -146,24 +146,24 @@ fn trace_rays(
 fn vs_main(in: VertexInput) -> VertexOutput {
     var out: VertexOutput;
 
-    let g = u32(GRID_SIZE);
-    let grid_total_count = g * g;
+    let GS = u32(GRID_SIZE);
+    let grid_total_count = GS * GS;
 
     let vertices = array(
         0,
         1,
-        g,
+        GS,
         1,
-        g + 1,
-        g,
+        GS + 1,
+        GS,
     );
 
     let cell_idx = in.vertex_index / 6;
-    let cell_coord = vec2u(cell_idx % (g - 1), cell_idx / (g - 1));
-    let cell_corner_vertex_idx = cell_coord.x + cell_coord.y * g;
-    let vertex_idx = cell_corner_vertex_idx + vertices[in.vertex_index % 6];
+    let cell_coord = vec2u(cell_idx % (GS - 1), cell_idx / (GS - 1));
+    let cell_corner_vertex_idx = cell_coord.x + cell_coord.y * GS;
+    let grid_local_vertex_idx = cell_corner_vertex_idx + vertices[in.vertex_index % 6];
 
-    let index = in.instance_index * grid_total_count + vertex_idx;
+    let index = in.instance_index * grid_total_count + grid_local_vertex_idx;
 
     let ray = rays[index];
     let last_lens = system.interfaces[system.interface_count - 1];
@@ -172,18 +172,16 @@ fn vs_main(in: VertexInput) -> VertexOutput {
 
     var out_pos = ray.pos;
 
-    let vertex_coords = vec2u(vertex_idx % g, vertex_idx / g);
-    out.tex_coords = vec2f(vertex_coords) / f32(g - 1);
+    let vertex_coords = vec2u(grid_local_vertex_idx % GS, grid_local_vertex_idx / GS);
+    out.tex_coords = vec2f(vertex_coords) / f32(GS - 1);
 
 
-    out.clip_position = camera.view_proj * vec4f(out_pos.xy * scale, out_pos.z, 1);
+    out.clip_position = camera.view_proj * vec4f(out_pos.xy * scale, 0, 1);
     out.position = out_pos;
 
     out.tex = ray.tex;
 
-    let lambda = in.instance_index % 3;
-    let wavelengths = array<f32, 3>(650, 510, 475);
-    let wavelength = wavelengths[lambda];
+    let wavelength = WAVELENGTHS[in.instance_index % 3];
 
     var col = wavelength_to_rgb(wavelength);
     out.color = col;
@@ -203,9 +201,9 @@ fn vs_main(in: VertexInput) -> VertexOutput {
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4f {
-//    if in.tex.z > 1 {
-//        discard;
-//    }
+    if in.tex.z > 1 {
+        discard;
+    }
 
 //    let focus = 25.0;
 //    let aperture_diameter = 14.0;
@@ -221,18 +219,17 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {
 	tex_intensity = smoothstep(0., 1., tex_intensity);
 	tex_intensity = mix(0.5, 1., tex_intensity);
 
-    let vignette = smoothstep(1.0, 0.9, length(in.tex.xy));
+    let vignette = smoothstep(1.0, 0.9, length(in.tex.xy) - 0.9);
 
 
     let area_ratio = in.area_ratio;
 
 
-//    let intensity = tex * tex_intensity * alpha * vignette * area_ratio * params.intensity * cutoff;
     let intensity = tex * tex_intensity * alpha * vignette * area_ratio * params.intensity * cutoff;
 
-//    if all(intensity == vec4f(0)) {
-//        discard;
-//    }
+    if all(intensity == vec4f(0)) {
+        discard;
+    }
 
     let color = vec4f(in.color.xyz, 1);
 

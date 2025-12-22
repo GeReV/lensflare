@@ -213,9 +213,7 @@ impl State {
             view_formats: &[],
         });
 
-        let lenses = &LensInterface::NIKON_28_75MM;
-
-        let lenses_uniform = LensSystemUniform::from(&lenses[..]);
+        let lenses_uniform = LensSystemUniform::from(&LensInterface::NIKON_28_75MM[..]);
 
         // Lens at interface_count - 1 is the sensor.
         let sensor = &lenses_uniform.interfaces[lenses_uniform.interface_count as usize - 1];
@@ -503,7 +501,7 @@ impl State {
             starburst_scale: 1.0,
             ray_dir,
             bid: -1,
-            intensity: 10.0,
+            intensity: 1.0,
             lambda: 520.0, // 520 nm is some green color.
         };
 

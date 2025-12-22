@@ -5,7 +5,7 @@ use crate::software::build_ray_grid_limits;
 use anyhow::format_err;
 use encase::internal::WriteInto;
 use encase::{ArrayLength, ShaderType, UniformBuffer};
-use glam::{vec3, vec4, Mat4, UVec3, Vec3, Vec4};
+use glam::{vec3, vec4, IVec2, Mat4, UVec2, UVec3, Vec3, Vec4};
 use std::f32::consts::PI;
 
 const NUM_INTERFACES: usize = 32;
@@ -87,7 +87,7 @@ impl CameraUniform {
 #[derive(Debug, Copy, Clone, ShaderType)]
 pub struct LensInterfaceUniform {
     pub center: Vec3,      // center of sphere / plane on z-axis
-    pub n: Vec3,           // refractive indices (n0, n1, n2)
+    pub n: IVec2,           // refractive indices (n0, n1, n2)
     pub radius: f32,       // radius of sphere/plane
     pub sa_half: f32,           // nominal radius (from optical axis)
     pub d1: f32,           // coating thickness = lambdaAR / 4 / n1
@@ -98,7 +98,7 @@ impl LensInterfaceUniform {
     pub const fn new() -> Self {
         LensInterfaceUniform {
             center: Vec3::ZERO,
-            n: Vec3::ZERO,
+            n: IVec2::ZERO,
             radius: 0.0,
             sa_half: 0.0,
             d1: 0.0,
@@ -131,14 +131,14 @@ impl From<&[LensInterface]> for LensSystemUniform {
         let mut total_lens_length: f32 = 0.0;
 
         for (i, lens) in lenses.iter().enumerate().rev() {
-            total_lens_length += lens.d0;
+            total_lens_length += lens.d;
 
             let n0 = if i == 0 { LensInterface::AIR_N } else { lenses[i - 1].n };
             let n2 = lens.n;
             let n1 = (n0 * n2).sqrt().max(1.38); // 1.38 = lowest achievable
 
-            let mut n0_idx: isize = -1;
-            let mut n2_idx: isize = -1;
+            let mut n0_idx: i32 = -1;
+            let mut n2_idx: i32 = -1;
 
             //if medium is not AIR, we must detect lens property
             if n0 != 1.0 || n2 != 1.0
@@ -153,17 +153,17 @@ impl From<&[LensInterface]> for LensSystemUniform {
                         let current_left_abbe_diff = (lens.nd - n0).abs();
                         if n0_idx_diff > current_left_abbe_diff
                         {
-                            n0_idx = idx as isize;
+                            n0_idx = idx as i32;
                             n0_idx_diff = current_left_abbe_diff;
                         }
                     }
-
+2
                     if n2 != 1.0
                     {
                         let current_right_abbe_diff = (lens.nd - n2).abs();
                         if n2_idx_diff > current_right_abbe_diff
                         {
-                            n2_idx = idx as isize;
+                            n2_idx = idx as i32;
                             n2_idx_diff = current_right_abbe_diff;
                         }
                     }
@@ -177,7 +177,7 @@ impl From<&[LensInterface]> for LensSystemUniform {
             result.interfaces[i] = LensInterfaceUniform {
                 center: vec3(0.0, 0.0, total_lens_length - lens.radius),
                 radius: lens.radius,
-                n: vec3(n0_idx as f32, n1, n2_idx as f32),
+                n: IVec2::new(n0_idx, n2_idx),
                 sa_half: lens.sa_half,
                 d1: lens.coating_thickness,
                 flat_surface: if lens.flat { 1 } else { 0 },
@@ -234,8 +234,6 @@ pub struct ParamsUniform {
     pub lambda: f32,
 }
 
-const N: usize = 16;
-
 #[repr(C)]
 #[derive(Debug, Clone, ShaderType)]
 pub struct GridLimitsUniform {
@@ -249,6 +247,8 @@ impl GridLimitsUniform {
         lenses_uniform: &LensSystemUniform,
         bounces_and_lengths: &BouncesAndLengthsUniform,
     ) -> Self {
+        const N: usize = 16;
+
         let mut result = Self {
             length: ArrayLength,
             limits: Vec::with_capacity(NUM_BOUNCES),

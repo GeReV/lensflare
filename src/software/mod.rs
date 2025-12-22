@@ -41,7 +41,7 @@ fn refract(e1: Vec3, e2: Vec3, n: f32) -> Vec3 {
 fn fresnel_anti_reflect(
     theta0: f32, // angle of incidence
     lambda: f32, // wavelength of ray
-    d0: f32,      // thickness of anti-reflection coating
+    d1: f32,      // thickness of anti-reflection coating
     n0: f32,     // RI (refr. index) of 1st medium
     n1: f32,     // RI of coating layer
     n2: f32,     // RI of the 2nd medium
@@ -66,7 +66,7 @@ fn fresnel_anti_reflect(
     let rip = tp01 * tp01 * rp12;
 
     // phase difference between outer and inner reflections
-    let dy = d0 * n1;
+    let dy = d1 * n1;
     let dx = (theta1.tan()) * dy;
     let delay = (dx * dx + dy * dy).sqrt();
     let rel_phase = 4.0 * PI / lambda * (delay - dx * (theta0.sin()));

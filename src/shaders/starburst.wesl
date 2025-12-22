@@ -52,7 +52,7 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4f {
   let count = arrayLength(&colors);
   for(var i: u32 = 0; i < count; i++) {
     let t = f32(i) / f32(count - 1);
-    let scale1 = mix(0.8, 1, t);
+    let scale1 = mix(0.7, 1, t);
     let scale2 = mix(1.0, 1.5, t);
 
     let scaled_uv1 = (uv / scale1) + 0.5;
@@ -71,7 +71,7 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4f {
 
     let color_mix = mix(vec4f(1), colors[i], 0.8);
 
-    let starburst = (starburst_val * mix(0.8, 1, d) * (1 - t) * color_mix) * 0.0001;
+    let starburst = (starburst_val * d * (1 - t) * color_mix) * 0.0001;
     let dust = pow(dust_val * smoothstep(0, 1, 0.5 - d) * colors[i], vec4f(1.1)) * 0.0002;
 
     out += (starburst + dust) * fade;
