@@ -149,7 +149,7 @@ fn vs_main(in: VertexInput) -> VertexOutput {
     let GS = u32(GRID_SIZE);
     let grid_total_count = GS * GS;
 
-    let vertices = array(
+    let vertices: array<u32, 6> = array(
         0,
         1,
         GS,
@@ -174,7 +174,6 @@ fn vs_main(in: VertexInput) -> VertexOutput {
 
     let vertex_coords = vec2u(grid_local_vertex_idx % GS, grid_local_vertex_idx / GS);
     out.tex_coords = vec2f(vertex_coords) / f32(GS - 1);
-
 
     out.clip_position = camera.view_proj * vec4f(out_pos.xy * scale, 0, 1);
     out.position = out_pos;
@@ -211,7 +210,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {
 //
 //    let f_stop = f / pow(sqrt(2.0), 5);
 
-    let cutoff = f32(in.tex.z < 1.0);
+    let cutoff = smoothstep(1.0, 0.9, in.tex.z);
     let alpha = in.tex.a;
 
     let tex = textureSample(ghost_texture, ghost_sampler, in.tex_coords);
@@ -221,9 +220,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {
 
     let vignette = smoothstep(1.0, 0.9, length(in.tex.xy) - 0.9);
 
-
     let area_ratio = in.area_ratio;
-
 
     let intensity = tex * tex_intensity * alpha * vignette * area_ratio * params.intensity * cutoff;
 
@@ -235,12 +232,14 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {
 
     let final_color = intensity * color;
 
-    return final_color;
+    if params.debug_wireframe_alpha <= 0 {
+        return final_color;
+    }
 
     let edge = edge_factor(in.barycentric_coord);
 
 //    let edge_color = vec4f(in.tex_coords, 0, 1) * 0.0001;
-    let edge_color = vec4f(1) * 0.001;
+    let edge_color = vec4f(1) * params.debug_wireframe_alpha;
 
     return mix(final_color, edge_color, 1-edge);
 }

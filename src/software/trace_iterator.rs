@@ -1,4 +1,5 @@
 use glam::{UVec3, Vec3, Vec3Swizzles};
+use crate::lenses::Lens;
 use crate::software;
 use crate::software::Ray;
 use crate::uniforms::LensInterfaceUniform as LensInterface;
@@ -108,13 +109,26 @@ impl<'a> Iterator for TraceIterator<'a> {
             }
 
             // do reflection/refraction for spher. surfaces
-            let n1 = f.n.y;
 
-            let (n0, n2) = if self.ray.dir.z < 0.0 {
-                (f.n.x, f.n.z)
+            let (n0_idx, n2_idx) = if self.ray.dir.z < 0.0 {
+                (f.n.x, f.n.y)
             } else {
-                (f.n.z, f.n.x)
+                (f.n.y, f.n.x)
             };
+
+            let n0 = if n0_idx >= 0 {
+                Lens::LENS_TABLE[n0_idx as usize].compute_ref_index(self.lambda * 1e-3)
+            } else {
+                1.0
+            };
+
+            let n2 = if n2_idx >= 0 {
+                Lens::LENS_TABLE[n2_idx as usize].compute_ref_index(self.lambda * 1e-3)
+            } else {
+                1.0
+            };
+
+            let n1 = (n0 * n2).sqrt().max(1.38);
 
             if !b_reflect
             {

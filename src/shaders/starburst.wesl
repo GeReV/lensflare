@@ -71,8 +71,8 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4f {
 
     let color_mix = mix(vec4f(1), colors[i], 0.8);
 
-    let starburst = (starburst_val * d * (1 - t) * color_mix) * 0.0001;
-    let dust = pow(dust_val * smoothstep(0, 1, 0.5 - d) * colors[i], vec4f(1.1)) * 0.0002;
+    let starburst = (starburst_val * pow(d, 1.9) * 3 * (1 - t) * color_mix) * 0.0001;
+    let dust = pow(dust_val * smoothstep(0.05, 1, (1 - d) * 0.2) * colors[i], vec4f(1.1)) * 0.0001;
 
     out += (starburst + dust) * fade;
   }

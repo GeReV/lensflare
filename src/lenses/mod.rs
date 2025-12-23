@@ -21,9 +21,26 @@ impl Lens {
         Self { a0, a1, a2, a3, a4, a5, a6, a7, a8, nc, nd, nf }
     }
 
-    // fn compute_ref_index(lambda_in_micrometers: f32) -> f32 {
-    //     0.0
-    // }
+    pub fn compute_ref_index(&self, lambda_in_micrometers: f32) -> f32 {
+        let lambda_pow2 = lambda_in_micrometers * lambda_in_micrometers;
+        let lambda_pow4 = lambda_pow2 * lambda_pow2;
+        let inv_lambda_pow2 = 1.0 / lambda_pow2;
+        let inv_lambda_pow4 = inv_lambda_pow2 * inv_lambda_pow2;
+        let inv_lambda_pow6 = inv_lambda_pow4 * inv_lambda_pow2;
+        let inv_lambda_pow8 = inv_lambda_pow6 * inv_lambda_pow2;
+        let inv_lambda_pow10 = inv_lambda_pow8 * inv_lambda_pow2;
+        let inv_lambda_pow12 = inv_lambda_pow10 * inv_lambda_pow2;
+
+        (self.a0
+            + self.a1 * lambda_pow2
+            + self.a2 * lambda_pow4
+            + self.a3 * inv_lambda_pow2
+            + self.a4 * inv_lambda_pow4
+            + self.a5 * inv_lambda_pow6
+            + self.a6 * inv_lambda_pow8
+            + self.a7 * inv_lambda_pow10
+            + self.a8 * inv_lambda_pow12).sqrt()
+    }
 
     pub const LENS_TABLE: [Self; 29] = [
         Self::new(

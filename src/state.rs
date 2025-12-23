@@ -440,8 +440,8 @@ impl State {
         let starburst_texture = device.create_texture(&TextureDescriptor {
             label: Some("Starburst Texture"),
             size: Extent3d {
-                width: 1024,
-                height: 1024,
+                width: 2048,
+                height: 2048,
                 depth_or_array_layers: 1,
             },
             usage: TextureUsages::TEXTURE_BINDING | TextureUsages::RENDER_ATTACHMENT,
@@ -2045,14 +2045,13 @@ impl State {
 
                     ui.separator();
 
-                    let max_bounces = (self.lenses_uniform.data.bounce_count - 1) as i32;
-
                     ui.slider(
                         "Bounce ID",
                         -1,
-                        max_bounces,
+                        self.lenses_uniform.data.bounce_count as i32,
                         &mut self.params_uniform.data.bid,
                     );
+
                     ui.slider(
                         "Wavelength",
                         360.0,

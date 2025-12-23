@@ -146,7 +146,6 @@ impl From<&[LensInterface]> for LensSystemUniform {
                 let mut n0_idx_diff = f32::MAX;
                 let mut n2_idx_diff = f32::MAX;
 
-
                 for (idx, lens) in Lens::LENS_TABLE.iter().enumerate() {
                     if n0 != 1.0
                     {
@@ -157,7 +156,7 @@ impl From<&[LensInterface]> for LensSystemUniform {
                             n0_idx_diff = current_left_abbe_diff;
                         }
                     }
-2
+
                     if n2 != 1.0
                     {
                         let current_right_abbe_diff = (lens.nd - n2).abs();

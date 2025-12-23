@@ -18,7 +18,7 @@ struct Lens
 
 struct LensInterface {
     center: vec3f, // center of sphere / plane on z-axis
-    n: vec2u, // indices of lens in array of lens types
+    n: vec2i, // indices of lens in array of lens types
     radius: f32, // radius of sphere/plane
     sa_half: f32, // nominal radius (from optical axis)
     d1: f32, // coating thickness = lambdaAR / 4 / n1

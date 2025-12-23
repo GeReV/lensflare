@@ -202,15 +202,14 @@ fn trace(
 
        r.pos = i.pos ;
 
-       // skip reflection/refraction for flat surfaces
-       if f.flat_surface == 1 {
-        t += delta;
-        continue;
-       }
-       // do reflection/refraction for spher. surfaces
-       var n0_idx: u32;
-       var n2_idx: u32;
-
+        // skip reflection/refraction for flat surfaces
+        if f.flat_surface == 1 {
+            t += delta;
+            continue;
+        }
+        // do reflection/refraction for spher. surfaces
+        var n0_idx: i32;
+        var n2_idx: i32;
 
         if r.dir.z < 0 {
             n0_idx = f.n.x;

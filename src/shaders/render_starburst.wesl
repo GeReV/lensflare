@@ -45,7 +45,7 @@ fn vs_main(@builtin(vertex_index) vertex_index : u32) -> VertexOutput {
   let ray_hit = ray_origin + ray_dir * t;
 
   let vert_pos = ray_hit + vec3f(pos[vertex_index], 0) * params.starburst_scale;
-  let out_pos = camera.view_proj * vec4(vert_pos.xy, 0, 1);
+  let out_pos = camera.view_proj * vec4(vert_pos.xy / vert_pos.z, 0, 1);
 
   var output: VertexOutput;
 
